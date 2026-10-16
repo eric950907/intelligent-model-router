@@ -269,9 +269,9 @@ weights:
       set: { quality_fit: "+0.10", cost_fit: "-0.10" }
     - when: { frontier_needed_above: 0.6 }
       set: { quality_fit: "+0.05", cost_fit: "-0.05" }
-    - when: { budget_present: true }
+    - when: { budget_present: true }     # = constraints.budget 非空
       set: { cost_fit: "+0.10", quality_fit: "-0.10" }
-    - when: { cost_sensitive: true }
+    - when: { cost_sensitive: true }     # = constraints.budget.cost_sensitive == true
       set: { cost_fit: "+0.15", quality_fit: "-0.15" }
   clamp: { min: 0.05, max: 0.95 }
 confidence:
@@ -285,14 +285,15 @@ confidence:
 ```yaml
 server: { listen: "0.0.0.0:8787", client_auth_token_env: RECOMMENDER_AUTH_TOKEN,
           admin_token_env: RECOMMENDER_ADMIN_TOKEN, metrics_enabled: true,
-          max_request_bytes: 4194304, request_timeout_ms: 10000 }
+          max_request_bytes: 4194304, request_timeout_ms: 15000 }
 backends:
   - id: jev
     kind: systemone
     base_url: https://api.typesafe.ai
     model: jev-1.13.0          # 钉死版本 ID,不用漂移 alias
     api_key_env: TYPESAFE_API_KEY
-    timeout_ms: 5000
+    timeout_ms: 5000           # 单次尝试
+    total_budget_ms: 8000      # 重试/退避/信号量排队共享的总预算,超预算立即降级
     max_inflight: 16
     retry: { max_attempts: 2, base_delay_ms: 250, honor_retry_after: true }
     long_context_header: false # 候选过多分片,而非开 262k 长上下文
@@ -312,7 +313,8 @@ secret 一律走环境变量(yaml 只存 env 名)。
 - 提取: 拼接文本内容(字符串或 content 数组中的 `text` 部分)→ `est_tokens` 估算;统计 `images`(content 里的 `image_url`/`image` 块)、`tools`(顶层 `tools[]` 长度)、`json_mode`(`response_format.type == "json_object"` 或 `"json_schema"`)、`stream`、`max_tokens`。
 - `request_excerpt`: 用户文本经清洗(去控制字符)后,取开头 2000 字符 + 末尾 500 字符,中间以 `…[截断]…` 标记;总长上限 3000 字符。**用于 Jev 的语义判断,单独放进 state 的专用字段,且不与 instructions 混排**(注入防护,见 9.4)。
 - `locale_hint`: CJK 字符占比 > 20% → `zh`,否则 `other`(仅作为提示,不做语言识别断言)。
-- 解析失败容错: 非 JSON 或缺少 `messages` → 尝试按 `{"messages":[{"role":"user","content":"<原文>"}]}` 包一层;再失败 → 422 `invalid_request_body`。
+- `task_hints`(可选): 固定检测表 v1 三条——文本含代码块围栏(三反引号)→ "包含代码块";含报错关键词(Error/Exception/异常/堆栈)→ "提到报错堆栈";含 URL → "包含链接"。命中才加入,无则省略该字段。
+- 解析失败容错: 非 JSON 或缺少 `messages` → 尝试按 `{"messages":[{"role":"user","content":"<原文>"}]}` 包一层;再失败 → `422 invalid_request_body`(外层信封 JSON 语法错误另由 `400 invalid_json` 处理,见 8.2)。
 
 ### 6.2 硬规则过滤(见 5.2)与 CoarseRank / 分片
 
@@ -322,7 +324,13 @@ secret 一律走环境变量(yaml 只存 env 名)。
 - N > 60:先 CoarseRank 截断到 60,再分片。
 - **降级路径**: 后端不可用时,一律返回 CoarseRank 确定性排序(任意 N),`degraded: true`。
 
-CoarseRank(v1 薄实现):`coarse = 0.5*标签重叠率 + 0.5*价格逆序分位`(tie-break: id 字典序)。它只服务"防超限 + 降级兜底",不追求质量;语义排序完全交给 ④。
+CoarseRank(v1 薄实现,确定性):
+- `needs` 标签集(由画像推导): `has_images ⇒ vision`;`tools_count>0 ⇒ tools`;`json_mode ⇒ json_mode`;`est_tokens > 32k ⇒ long_context`;needs 为空时重叠率记 1.0。
+- 标签重叠率 = |needs ∩ model.tags| / |needs|。
+- 价格分位 = 1 − 输入单价的升序分位(最便宜 = 1.0,最贵 = 0.0;N=1 时 = 1.0)。
+- `coarse = 0.5*标签重叠率 + 0.5*价格分位`;tie-break = id 字典序(与 6.4 一致)。
+
+它只服务"防超限(>60 截断)+ 降级兜底",不追求质量;语义排序完全交给 ④。
 
 ### 6.3 Jev 提问构造(6.3 是本文档最核心的可实现细节)
 
@@ -341,7 +349,7 @@ CoarseRank(v1 薄实现):`coarse = 0.5*标签重叠率 + 0.5*价格逆序分位`
   "candidates": [
     { "i": 0, "id": "claude-sonnet-4.6", "desc": "高能力通用模型;代码与长上下文突出",
       "tags": ["code","reasoning","long_context","tools","zh_good"],
-      "ctx": 200000, "price_band": "high", "in_price": 3.0, "out_price": 15.0 },
+      "ctx": 200000, "price_band": "mid", "in_price": 3.0, "out_price": 15.0 },
     { "i": 1, "id": "deepseek-v3.2", "desc": "高性价比通用;中文强", "tags": ["chat","code","tools","zh_strong","cheap"],
       "ctx": 131072, "price_band": "cheap", "in_price": 0.28, "out_price": 0.42 }
   ]
@@ -379,7 +387,7 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 
 1. **硬约束**: `✅ 硬约束全部满足:上下文 200k ≥ 估算 8k;safety 系数 1.15;支持 tool_calls`(或注明被过滤原因——仅出现在 `no_candidates`/`filtered_by_rule` 审计信息中,推荐项不出现)
 2. **质量匹配**: `🧠 质量匹配 0.92(概率集中在「最佳匹配」61%):与代码调试任务特征高度吻合`
-3. **成本适配**: `💰 成本适配 0.50($3.0/M 输入,高档):在预算上限内但非最省`
+3. **成本适配**: `💰 成本适配 0.50($3.0/M 输入,中档):在预算上限内但非最省`
 4. **置信度提示**(低置信时): `⚠️ 置信度中等(0.61):质量判断在「合适/最佳匹配」间存在分歧,建议结合第 2 名对比`
 5. **软惩罚说明**(如有)
 
@@ -444,15 +452,20 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 
 ### 8.2 错误与降级语义
 
+所有非 2xx 响应体统一为: `{"error":"<code>","message":"<说明>","request_id":"<id>"}`(200 降级响应仍走正常响应体,不走此信封)。
+
 | 情况 | 行为 |
 |---|---|
-| 请求体非法/超限 | `400 invalid_request_body` / `413 request_too_large` |
+| 外层信封非法 JSON | `400 invalid_json` |
+| 请求体超限 | `413 request_too_large` |
+| `request` 字段无法解析为任一已知格式 | `422 invalid_request_body`(附尝试过的格式;与 6.1 一致) |
 | 约束字段非法 | `422 invalid_constraints`(附字段路径) |
 | 后端 4xx(非 429,如 400/401/413/422) | 不重试(确定性错误,多为配置/请求问题)→ 同样降级:`degraded: true` + `meta.degraded_reason: backend_4xx` + 指标计数(不把配置错误放大为服务中断) |
 | `options.include_debug: true` 时后端出错 | 不降级,返回 `502 upstream_error` + 上游错误详情(联调时暴露真实问题) |
 | 后端 429/529/超时/连接失败/5xx | 退避重试 1 次(尊重 `retry-after`,封顶 2s)→ 仍失败 → **降级**:返回 CoarseRank 排序(见 6.2)+ `degraded: true` + `meta.degraded_reason` + 理由注明"未经语义判断(后端不可用)" |
-| 后端返回缺少问题答案 | 该维度按 0.5 中性值 + 记录警告;在 `meta` 标记 `partial_answers` |
-| 在途并发占满 | 等待 ≤2s,仍满 → 降级路径 |
+| 后端返回缺少问题答案 | 每候选 Score 维度按 0.5 中性值;共享问题缺失时权重调整条件视为未命中、响应 `profile` 对应字段为 null;记录警告并在 `meta.partial_answers` 列出 |
+| 在途并发占满 | 等待 ≤2s(受后端总预算约束),仍满 → 降级路径 |
+| 入站超时(体验兜底) | `408 request_timeout`(含 request id);正常路径不触发:后端总预算 8s + 降级 <10ms ≪ 入站 15s |
 | 服务内部错误 | `500 internal_error`(带 request id) |
 
 降级路径 SLA: ≤10ms 返回可用排序(无网络)。
@@ -476,7 +489,7 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 - 目录/权重/配置变更 → 版本 hash 变化 → 旧键自然失效(不主动清理)。
 
 ### 9.2 重试与超时
-- 连接超时 1s、请求超时 `timeout_ms`(默认 5000);重试仅限 429/529/连接/超时,最多 2 次尝试,指数退避 + 抖动,尊重 `retry-after`(秒或日期)封顶 2s。
+- 连接超时 1s、请求超时 `timeout_ms`(默认 5000);重试仅限 429/529/连接/超时,最多 2 次尝试,指数退避 + 抖动,尊重 `retry-after`(秒或日期)封顶 2s。所有尝试(含退避与信号量排队)共享 `total_budget_ms`(默认 8000),超预算立即放弃并走降级;入站 `request_timeout_ms`(默认 15000)> 后端总预算(8000)+ 降级耗时,正常路径入站超时不会先触发。
 
 ### 9.3 并发与限流自我保护
 - `tokio::Semaphore` 限制在途后端调用(`max_inflight`,默认 16);获取许可等待上限 2s。
