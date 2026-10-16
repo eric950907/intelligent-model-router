@@ -39,6 +39,7 @@
 - 一次批量语义调用(共享问题 + 每候选维度的 Score 问题),代码融合与模板理由(zh/en)。
 - 内存缓存、后端重试与降级、结构化日志与指标、审计日志。
 - CLI:`validate-catalog`、`dry-run`(打印将发送的完整问题,不联网)、`eval`(评估集跑分)。
+- 本地部署:单二进制 + `configs/` 直接运行(见 9.6);默认对接云 Jev(需 `TYPESAFE_API_KEY`),无 key / 断网时自动走降级链路。
 
 ### v1 明确不做
 - 不做转发/计费/鉴权体系/用户管理(那是网关职责)。
@@ -114,6 +115,7 @@ model-recommender/                      # git 仓库根
 ├─ eval/
 │  └─ scenarios/     # 评估集 YAML + request fixtures
 ├─ templates/                            # reason.zh.toml / reason.en.toml(理由模板)
+├─ examples/                             # sample-request.json(本地试用样例)
 ├─ docs/superpowers/specs/               # 本文档
 └─ .gitignore
 ```
@@ -521,6 +523,19 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 - 指标(可选开关): `recommend_requests_total{result}`, `backend_latency_seconds` (histogram), `cache_hit_ratio`, `degraded_total`, `backend_429_total`, `fusion_score` (histogram)。
 - **审计日志**(独立文件/输出流,JSONL): `{ts, request_id, profile_hash, constraints, weights_version, catalog_version, top_k: [...], degraded, usage}`。是 v1.1 标注回路与 shadow 评估的原料。
 
+### 9.6 本地部署与试用(默认场景)
+
+- **形态**: `cargo build --release` 产物为单二进制;本地直接运行(容器化仅作可选补充):
+  ```bash
+  recommender-cli validate-catalog --configs configs/                   # 1. 校验配置
+  recommender-cli dry-run --request examples/sample-request.json --configs configs/   # 2. 不联网:查看将发给 Jev 的完整问题
+  TYPESAFE_API_KEY=xxx recommender-server --configs configs/            # 3. 本地启动服务
+  curl -s http://127.0.0.1:8787/v1/recommend \
+       -H 'content-type: application/json' -d @examples/sample-request.json  # 4. 端到端拿 top5 + 理由
+  ```
+- **无 key / 断网行为**: 服务照常启动并应答;Jev 调用失败(如缺 key → 401)按 8.2 降级为粗排 + `degraded: true`,规则/融合/理由/审计链路仍可完整观察。
+- **数据出境提示**: 语义判断会把清洗、截断后的请求摘要与候选目录(不含 key)发送至 `api.typesafe.ai`;敏感数据试用请用降级模式,或走 13 节的纯本地 Laya 路线(v1.1)。
+
 ---
 
 ## 10. 测试与评估
@@ -550,7 +565,7 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 |---|---|---|---|
 | M0 骨架 | workspace、四份配置、catalog 加载+校验、规则引擎、API 薄壳、mock 后端、单测 | `dry-run` CLI 对样例请求打印完整待发问题(不联网) | 0.5–1 天 |
 | M1 核心 | systemone 客户端、提问构造、融合、理由渲染、真实联调 | `curl /v1/recommend` 端到端出 top5+理由;golden fixtures 通过 | 1–2 天 |
-| M2 运维 | 缓存、降级、重试、指标/日志、eval 工具、Docker/部署文档 | 验收标准 1–4 全过 | 1 天 |
+| M2 运维 | 缓存、降级、重试、指标/日志、eval 工具、本地部署与试用引导(9.6)、Docker(可选) | 验收标准 1–4 全过;本地试用手册(四步 + curl)可用 | 1 天 |
 | M3 集成 | new-api 旁路接入示例(文档+最小 demo)、shadow 回放跑通 | 集成说明 + 首轮 shadow 报告 | 按需 |
 
 ---
