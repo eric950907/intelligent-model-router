@@ -39,11 +39,11 @@
 - 一次批量语义调用(共享问题 + 每候选维度的 Score 问题),代码融合与模板理由(zh/en)。
 - 内存缓存、后端重试与降级、结构化日志与指标、审计日志。
 - CLI:`validate-catalog`、`dry-run`(打印将发送的完整问题,不联网)、`eval`(评估集跑分)。
-- 本地部署:单二进制 + `configs/` 直接运行(见 9.6);默认对接云 Jev(需 `TYPESAFE_API_KEY`),无 key / 断网时自动走降级链路。
+- 本地部署:单二进制 + `configs/` 直接运行(见 9.6);默认对接云 Jev(需 `TYPESAFE_API_KEY`;区域限制环境需后端代理,见 7 节),无 key / 断网时自动走降级链路。
 
 ### v1 明确不做
 - 不做转发/计费/鉴权体系/用户管理(那是网关职责)。
-- 不做本地 Laya/KEV 模型部署(仅保证契约兼容)。
+- 不做本地 Laya/KEV 模型部署(仅保证契约兼容;这是区域限制场景的治本路线,见 13 节)。
 - 不做 Web UI。
 - 不做学习型粗排与分类器蒸馏(留 v1.1,材料是审计日志)。
 - 不做多租户、不做 Embedding/向量检索。
@@ -301,6 +301,7 @@ backends:
     base_url: https://api.typesafe.ai
     model: jev-1.13.0          # 钉死版本 ID,不用漂移 alias
     api_key_env: TYPESAFE_API_KEY
+    proxy: null                # 区域限制(451)时必需,例: http://127.0.0.1:7897;留空则沿用 HTTPS_PROXY/ALL_PROXY 环境变量
     timeout_ms: 5000           # 单次尝试
     total_budget_ms: 8000      # 重试/退避/信号量排队共享的总预算,超预算立即降级
     max_inflight: 16
@@ -310,7 +311,7 @@ cache: { enabled: true, ttl_secs: 600, max_entries: 2048 }
 limits: { max_candidates_in_call: 30, max_candidates_judged: 60, default_top_k: 5 }
 ```
 
-secret 一律走环境变量(yaml 只存 env 名)。
+secret 一律走环境变量(yaml 只存 env 名;backend `proxy` 为空时自动沿用 `HTTPS_PROXY`/`ALL_PROXY` 环境变量,见 7 节区域限制)。
 
 ---
 
@@ -415,6 +416,8 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
   - `score` = Σ(档位序号 × 概率),可为小数;`confidence` 由概率分布集中度导出。
 - 限制: 请求体 ≤32MiB(支持 gzip/zstd 压缩层,单一层);嵌套 ≤64;数字必须有限;Jev 默认上下文 64k/请求、32k/问题(可选 `TypeSafe-Danger-Zone-Long-Context: true` 提到 262k,本项目默认不用);错误码 400/401/413/415/422/429/529(429/529 需按 `retry-after` 退避重试);上下文超限返回 `400 max_tokens_exceeded`。
 - 模型: `jev-latest`(当前指向 jev-1.13.0)/`jev-preview`(1.14.0);价格 $0.042/M 输入 token,输出免费;延迟 ~100–500ms;各版本行为有差异,故**钉死版本 ID**。KEV(Qwen3.5+LoRA,兼容契约)与 Laya(开源 ModernBERT 系,兼容契约)只需更换 `base_url`/`model` 配置。
+- 区域限制: 部分地区(实测大陆直连)返回 `451 not available in your region`;客户端需支持代理(见 5.4 `proxy`),或改用本地 Laya(见 13 节)。
+- 契约实测(2026-10-16): `jev-latest` 解析为 `jev-1.13.0`;显式 `model: "jev-1.13.0"` 可用;`noul`/`score` 响应字段(score/legend/probabilities/confidence/usage)与本节摘要一致。
 
 ---
 
@@ -529,11 +532,13 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
   ```bash
   recommender-cli validate-catalog --configs configs/                   # 1. 校验配置
   recommender-cli dry-run --request examples/sample-request.json --configs configs/   # 2. 不联网:查看将发给 Jev 的完整问题
-  TYPESAFE_API_KEY=xxx recommender-server --configs configs/            # 3. 本地启动服务
+  TYPESAFE_API_KEY=xxx HTTPS_PROXY=http://127.0.0.1:7897 \
+      recommender-server --configs configs/            # 3. 本地启动服务(区域限制时需代理,见下)
   curl -s http://127.0.0.1:8787/v1/recommend \
        -H 'content-type: application/json' -d @examples/sample-request.json  # 4. 端到端拿 top5 + 理由
   ```
 - **无 key / 断网行为**: 服务照常启动并应答;Jev 调用失败(如缺 key → 401)按 8.2 降级为粗排 + `degraded: true`,规则/融合/理由/审计链路仍可完整观察。
+- **区域限制(451)**: 大陆等地区直连 `api.typesafe.ai` 会被拒(451);给服务配置代理即可(server.yaml backend `proxy`,或启动时 `HTTPS_PROXY`),已实测经代理 HTTP 200。
 - **数据出境提示**: 语义判断会把清洗、截断后的请求摘要与候选目录(不含 key)发送至 `api.typesafe.ai`;敏感数据试用请用降级模式,或走 13 节的纯本地 Laya 路线(v1.1)。
 
 ---
@@ -575,6 +580,7 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 | 风险 | 影响 | 对策 |
 |---|---|---|
 | Jev 无 SLA/限流漂移 | 服务不可用 | 重试+降级(确定性排序)+ 契约兼容备用后端(Laya/KEV 换 base_url);`max_inflight` 保护配额 |
+| TypeSafe 区域限制(451) | 云 Jev 直连不可用 | 后端 `proxy` 配置(已实测可用);治本是 13 节的本地 Laya |
 | 权重/档位未标定 | 排序不符合直觉 | `questions.yaml` 数据化;评估集 + shadow 回放闭环调参;门槛(flag_below)在自有数据上标定 |
 | 用户文本注入 state | 判断被操纵 | state 只作为数据、指令只在 questions、清洗+截断+专用字段(9.4) |
 | 候选过多超 token/上下文 | 请求失败 | 分片并行(>30,每片 ≤30)+ 硬上限截断(>60,先粗排截断);token 预算公式内建(6.3) |
@@ -587,6 +593,6 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 
 - 审计日志 → 标注回路 → 学习型粗排(参考 new-api "优先级分层+加权随机"的确定性调度思路)。
 - 置信度门槛联动: 低置信度自动放宽 top_k / 返回两个候选对比说明。
-- 本地 Laya backend profile + 校准报告。
+- 本地 Laya backend profile(彻底摆脱区域限制,纯本地真实判断)+ 校准报告。
 - new-api `CatalogProvider`(从 `/api/pricing` 同步)。
 - 蒸馏: 把稳定高频判断训练为本地小分类器(feature = 画像字段)。
