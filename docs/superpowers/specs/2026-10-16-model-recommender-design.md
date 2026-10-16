@@ -129,10 +129,17 @@ pub trait CatalogProvider: Send + Sync {
     fn version(&self) -> &str;            // 内容 hash,用于缓存 key 与审计
 }
 
+/// 规则上下文: 一次请求内所有规则共享的输入
+pub struct RuleCtx<'a> {
+    pub profile: &'a Profile,
+    pub constraints: &'a Constraints,   // budget/vendor/tags 等调用方约束
+    pub options: &'a Options,           // top_k/locale/include_debug
+}
+
 /// 硬规则。配置里按 name 实例化;注册表: fn build(name, params) -> Box<dyn Rule>
 pub trait Rule: Send + Sync {
     fn name(&self) -> &str;
-    fn eval(&self, profile: &Profile, model: &ModelEntry) -> RuleOutcome;
+    fn eval(&self, ctx: &RuleCtx, model: &ModelEntry) -> RuleOutcome;
 }
 
 pub enum RuleOutcome {
@@ -212,7 +219,7 @@ soft_penalties:
 
 规则语义(确定性,可单测):
 - `capability`: `tools_count>0 ⇒ capabilities.tools`;`has_images ⇒ capabilities.vision`;`json_mode ⇒ capabilities.json_mode`;`stream` 不产生约束。违反 → `Filter`。
-- `context_length`: `ceil(est_tokens*safety_factor) + max_tokens_estimate ≤ context_window`。违反 → `Filter`。`est_tokens` 估算规则:v1 用"字符数/3.5(中英混合保守系数)+ 每消息 4 token 开销";决策文档与实现同源。
+- `context_length`: `ceil(est_tokens*safety_factor) + max_tokens_estimate ≤ context_window`。违反 → `Filter`。`est_tokens` 估算规则:v1 用 `ASCII 字符数/3.5 + CJK 字符数/1.5 + 每消息 4 token 开销`(保守系数,按评估集可调);决策文档与实现同源。
 - `budget`: `constraints.budget.max_input_price_per_mtok` 存在且 `price.in_per_mtok >` 上限 → `Filter`;`constraints.budget.cost_sensitive == true` → 影响融合权重(见 6.4)。
 - `vendor`: `constraints.vendor_deny` 命中 → `Filter`;`vendor_allow` 非空且不命中 → `Filter`。
 - `tag_require`: `constraints.require_tags` 任一不在 `model.tags` → `Filter`。
@@ -327,7 +334,7 @@ secret 一律走环境变量(yaml 只存 env 名)。
 CoarseRank(v1 薄实现,确定性):
 - `needs` 标签集(由画像推导): `has_images ⇒ vision`;`tools_count>0 ⇒ tools`;`json_mode ⇒ json_mode`;`est_tokens > 32k ⇒ long_context`;needs 为空时重叠率记 1.0。
 - 标签重叠率 = |needs ∩ model.tags| / |needs|。
-- 价格分位 = 1 − 输入单价的升序分位(最便宜 = 1.0,最贵 = 0.0;N=1 时 = 1.0)。
+- 价格分位 = 1 − r/(N−1)(r = 输入单价升序名次,0 起点;最便宜 = 1.0,最贵 = 0.0;N=1 时记 1.0)。
 - `coarse = 0.5*标签重叠率 + 0.5*价格分位`;tie-break = id 字典序(与 6.4 一致)。
 
 它只服务"防超限(>60 截断)+ 降级兜底",不追求质量;语义排序完全交给 ④。
@@ -367,6 +374,7 @@ CoarseRank(v1 薄实现,确定性):
 norm(s) = s.score / (len(s.criteria) - 1)          // 都在 [0,1]
 
 // 2) 权重: 从 questions.yaml 取 base,按 adjustments 逐条叠加(命中条件读共享答案与约束),
+//    条件阈值一律比较原始 answer 值(difficulty 原始 0–2 分,不归一化);
 //    最后对 {quality_fit, cost_fit} 归一化到和为 1,并 clamp 到 [0.05,0.95]
 
 // 3) 候选综合分
@@ -431,10 +439,10 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 {
   "recommendations": [
     {
-      "model": "claude-sonnet-4.6", "rank": 1, "score": 0.815, "confidence": 0.61,
+      "model": "claude-sonnet-4.6", "rank": 1, "score": 0.773, "confidence": 0.61,
       "low_confidence": false,
       "breakdown": {
-        "quality_fit": 0.92, "cost_fit": 0.50, "weights": {"quality_fit": 0.75, "cost_fit": 0.25},
+        "quality_fit": 0.92, "cost_fit": 0.50, "weights": {"quality_fit": 0.65, "cost_fit": 0.35},
         "penalty": 0.0, "rule_hits": ["capability:tools✓", "context_length✓", "budget✓"]
       },
       "reasons": ["✅ …", "🧠 …", "💰 …"]
@@ -447,6 +455,7 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 }
 ```
 
+- 示例体现 `budget_present` 调整:权重 0.65/0.35,`score = 0.65×0.92 + 0.35×0.50 = 0.773`(与 6.4 公式一致)。
 - `include_debug: true` 时追加 `debug: {questions_sent, answers_raw, state}`(供 dry-run 联调)。
 - 全部候选被过滤(或目录为空):200 + `recommendations: []` + `profile` + `meta.filtered: [{rule, count}]`。合法结果,不报错(4.1 与本契约一致)。
 
@@ -462,11 +471,16 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 | 约束字段非法 | `422 invalid_constraints`(附字段路径) |
 | 后端 4xx(非 429,如 400/401/413/422) | 不重试(确定性错误,多为配置/请求问题)→ 同样降级:`degraded: true` + `meta.degraded_reason: backend_4xx` + 指标计数(不把配置错误放大为服务中断) |
 | `options.include_debug: true` 时后端出错 | 不降级,返回 `502 upstream_error` + 上游错误详情(联调时暴露真实问题) |
-| 后端 429/529/超时/连接失败/5xx | 退避重试 1 次(尊重 `retry-after`,封顶 2s)→ 仍失败 → **降级**:返回 CoarseRank 排序(见 6.2)+ `degraded: true` + `meta.degraded_reason` + 理由注明"未经语义判断(后端不可用)" |
+| 后端 429、5xx(含 529)、超时、连接失败 | 退避重试 1 次(尊重 `retry-after`,封顶 2s)→ 仍失败 → **降级**:返回 CoarseRank 排序(见 6.2)+ `degraded: true` + `meta.degraded_reason` + 理由注明"未经语义判断(后端不可用)" |
 | 后端返回缺少问题答案 | 每候选 Score 维度按 0.5 中性值;共享问题缺失时权重调整条件视为未命中、响应 `profile` 对应字段为 null;记录警告并在 `meta.partial_answers` 列出 |
 | 在途并发占满 | 等待 ≤2s(受后端总预算约束),仍满 → 降级路径 |
 | 入站超时(体验兜底) | `408 request_timeout`(含 request id);正常路径不触发:后端总预算 8s + 降级 <10ms ≪ 入站 15s |
 | 服务内部错误 | `500 internal_error`(带 request id) |
+
+**降级/空结果/缺答案的响应字段口径**:
+- **降级**(CoarseRank):`recommendations[].score` = 粗排分;`confidence = null`、`low_confidence = false`(降级态以顶层 `degraded` 为准);`breakdown` 的 `quality_fit/cost_fit/weights/penalty = null`,增加 `coarse: {tag_overlap, price_score}`;`rule_hits` 保留(硬规则照常执行);`profile` 判断字段(`task_type/difficulty/frontier_needed`)= null;`meta.usage = null`;理由注明"未经语义判断(后端不可用)"。
+- **空结果**(全部被过滤/目录为空):`recommendations: []`;`profile` 判断字段 = null;`meta.usage = null`;`meta.filtered` 列出各规则过滤计数。
+- **缺答案**(partial):缺失维度按**归一化 0.5** 参与融合,其 `confidence = 0.0`(因此该候选 `low_confidence = true`);`meta.partial_answers` 列出缺失问题 ID。
 
 降级路径 SLA: ≤10ms 返回可用排序(无网络)。
 
@@ -483,13 +497,13 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 
 ### 9.1 缓存
 - `moka` 内存 LRU;key = `blake3(canonical(profile_core) + canonical(constraints) + catalog_version + weights_version + top_k + locale)`。
-- `profile_core` 只含影响判断的字段(est_tokens 分桶到 256 粒度、布尔量、excerpt 的 blake3、候选 id 集合)——避免因微小文本差异全部 miss。
+- `profile_core` 只含影响判断的字段(est_tokens 分桶到 256 粒度、布尔量、tools_count、max_tokens、excerpt 的 blake3、候选 id 集合)——避免因微小文本差异全部 miss。
 - 命中直接返回完整响应(`meta.cache_hit=true`);TTL 默认 600s;`max_entries` 2048。
 - **`options.include_debug: true` 绕过缓存(不读不写)**: 调试响应(含原始答案/state)绝不入缓存,不会串给普通请求。
 - 目录/权重/配置变更 → 版本 hash 变化 → 旧键自然失效(不主动清理)。
 
 ### 9.2 重试与超时
-- 连接超时 1s、请求超时 `timeout_ms`(默认 5000);重试仅限 429/529/连接/超时,最多 2 次尝试,指数退避 + 抖动,尊重 `retry-after`(秒或日期)封顶 2s。所有尝试(含退避与信号量排队)共享 `total_budget_ms`(默认 8000),超预算立即放弃并走降级;入站 `request_timeout_ms`(默认 15000)> 后端总预算(8000)+ 降级耗时,正常路径入站超时不会先触发。
+- 连接超时 1s、请求超时 `timeout_ms`(默认 5000);重试触发条件与 8.2 一致(429、5xx 含 529、连接失败、超时),最多 2 次尝试,指数退避 + 抖动,尊重 `retry-after`(秒或日期)封顶 2s。所有尝试(含退避与信号量排队)共享 `total_budget_ms`(默认 8000),超预算立即放弃并走降级;入站 `request_timeout_ms`(默认 15000)> 后端总预算(8000)+ 降级耗时,正常路径入站超时不会先触发。
 
 ### 9.3 并发与限流自我保护
 - `tokio::Semaphore` 限制在途后端调用(`max_inflight`,默认 16);获取许可等待上限 2s。
