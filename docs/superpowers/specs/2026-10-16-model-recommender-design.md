@@ -78,10 +78,11 @@ POST /v1/recommend { request, constraints?, options? }
  ├─② HardRuleEngine        纯代码,μs 级;规则 = 有序插件链(Vec<Box<dyn Rule>>)
  │   每条规则对每个候选返回 Pass / Filter{reason} / Penalty{value, reason}
  │   产出: 候选集合 + 规则命中记录(供理由与审计)
- │   若候选为空 → 直接 200 + recommendations:[] + no_candidates 说明(合法答案)
+ │   若候选为空 → 直接 200 + recommendations:[] + meta.filtered(见 8.1;合法结果)
  │
- ├─③ CoarseRank            纯代码;仅当候选数 > max_candidates_in_call(默认 30)启用
- │   确定性打分(标签重叠 + 价格排序)→ 取前 N;v1 为薄实现,默认场景 no-op
+ ├─③ CoarseRank/分片规划    纯代码,确定性打分(标签重叠率 + 价格分位)
+ │   ≤30 单次;30<N≤60 分片并行后合并;N>60 先粗排截断到 60 再分片
+ │   粗排同时是降级路径的排序依据(任意 N,见 6.2)
  │
  ├─④ Judgment              一次(或分片并行的)systemone 批量调用
  │   state   = 请求画像摘要 + 精简候选目录(每候选: id/描述/tags/上下文/价格档)
@@ -112,11 +113,12 @@ model-recommender/                      # git 仓库根
 │  └─ server.yaml
 ├─ eval/
 │  └─ scenarios/     # 评估集 YAML + request fixtures
+├─ templates/                            # reason.zh.toml / reason.en.toml(理由模板)
 ├─ docs/superpowers/specs/               # 本文档
 └─ .gitignore
 ```
 
-依赖(锁定版本在实现计划阶段):`axum`, `tokio`, `reqwest`(rustls), `serde`/`serde_json`, `serde_yaml`, `moka`(缓存), `tracing`/`tracing-subscriber`, `tower-http`(trace/limit), `thiserror`/`anyhow`, `blake3`(hash), `uuid`, `prometheus`(或 `metrics` 系列)。dev: `wiremock`, `insta`, `rstest`。
+依赖(锁定版本在实现计划阶段):`axum`, `tokio`, `reqwest`(rustls), `serde`/`serde_json`, `serde_yaml`, `moka`(缓存), `tracing`/`tracing-subscriber`, `tower`/`tower-http`(限流/追踪/请求体上限), `thiserror`/`anyhow`, `blake3`(hash), `uuid`, `prometheus`(或 `metrics` 系列)。dev: `wiremock`, `insta`, `rstest`。
 
 ### 4.3 可插拔 trait(注册表工厂 + 配置驱动)
 
@@ -187,7 +189,7 @@ models:
     groups: [default]
 ```
 
-字段全部必填(除 `description` 之外的类型化校验由 `validate-catalog` 保证:`id` 唯一、`context_window>0`、价格非负、`tags` 非空、能力布尔齐全)。
+**必填**: `id`(唯一)、`name`、`vendor`、`tags`(非空)、`capabilities`(布尔齐全)、`context_window`(>0)、`price`(非负);**可选**: `description`(默认空)、`quality_notes`(默认空)、`max_output`(默认 = `context_window`)、`groups`(默认 `[default]`)、`status`(默认 enabled)。以上约束由 `validate-catalog` 校验。**v1 语义**: `status: disabled` 的模型在加载时直接排除;`groups` 与 `soft_penalties.vendor_preference` 为 v1.1 保留字段(加载时校验格式、暂不消费)。
 
 ### 5.2 `rules.yaml`
 
@@ -255,8 +257,11 @@ per_candidate:
     type: score
     instructions: >-
       `candidates[<i>]` 的成本与需求方的预算/敏感度匹配度?(考虑输入/输出单价与
-      profile.cost_band;价格档位: cheap/mid/high 已标注在候选上)
+      state.constraints;价格档位: cheap/mid/high 已标注在候选上;无约束时按中性判断)
     criteria: ["超出预算或性价比明显差", "成本可接受", "经济实惠"]
+price_bands:                  # 代码据此把输入单价($/M tok)映射为 price_band
+  cheap_max: 1.0
+  mid_max: 5.0                # 超出即 high
 weights:
   base: { quality_fit: 0.75, cost_fit: 0.25 }
   adjustments:                # 命中即调整,可叠加,最后对两维归一化
@@ -279,6 +284,7 @@ confidence:
 
 ```yaml
 server: { listen: "0.0.0.0:8787", client_auth_token_env: RECOMMENDER_AUTH_TOKEN,
+          admin_token_env: RECOMMENDER_ADMIN_TOKEN, metrics_enabled: true,
           max_request_bytes: 4194304, request_timeout_ms: 10000 }
 backends:
   - id: jev
@@ -291,7 +297,7 @@ backends:
     retry: { max_attempts: 2, base_delay_ms: 250, honor_retry_after: true }
     long_context_header: false # 候选过多分片,而非开 262k 长上下文
 cache: { enabled: true, ttl_secs: 600, max_entries: 2048 }
-limits: { max_candidates_in_call: 30, default_top_k: 5 }
+limits: { max_candidates_in_call: 30, max_candidates_judged: 60, default_top_k: 5 }
 ```
 
 secret 一律走环境变量(yaml 只存 env 名)。
@@ -308,9 +314,15 @@ secret 一律走环境变量(yaml 只存 env 名)。
 - `locale_hint`: CJK 字符占比 > 20% → `zh`,否则 `other`(仅作为提示,不做语言识别断言)。
 - 解析失败容错: 非 JSON 或缺少 `messages` → 尝试按 `{"messages":[{"role":"user","content":"<原文>"}]}` 包一层;再失败 → 422 `invalid_request_body`。
 
-### 6.2 硬规则过滤(见 5.2)与 CoarseRank
+### 6.2 硬规则过滤(见 5.2)与 CoarseRank / 分片
 
-CoarseRank(v1 薄实现,仅候选超限时启用):`coarse = 0.5*标签重叠率 + 0.5*价格逆序分位`,取前 `max_candidates_in_call`。它只服务"防超限",不追求质量;语义排序完全交给 ④。
+**候选规模策略(v1 唯一口径)**:
+- N ≤ `max_candidates_in_call`(默认 30):单次 systemone 调用。
+- 30 < N ≤ `max_candidates_judged`(默认 60):分片为每片 ≤30,并行调用,按候选序号合并答案。
+- N > 60:先 CoarseRank 截断到 60,再分片。
+- **降级路径**: 后端不可用时,一律返回 CoarseRank 确定性排序(任意 N),`degraded: true`。
+
+CoarseRank(v1 薄实现):`coarse = 0.5*标签重叠率 + 0.5*价格逆序分位`(tie-break: id 字典序)。它只服务"防超限 + 降级兜底",不追求质量;语义排序完全交给 ④。
 
 ### 6.3 Jev 提问构造(6.3 是本文档最核心的可实现细节)
 
@@ -321,10 +333,11 @@ CoarseRank(v1 薄实现,仅候选超限时启用):`coarse = 0.5*标签重叠率 
 {
   "profile": {
     "est_tokens": 8200, "has_images": false, "tools_count": 3, "json_mode": false,
-    "max_tokens": 4096, "cost_band": "unknown", "locale_hint": "zh"
+    "max_tokens": 4096, "locale_hint": "zh"
   },
   "request_excerpt": "……清洗截断后的用户请求文本……",
   "task_hints": ["包含代码块", "提到报错堆栈"],
+  "constraints": { "budget_max_in_price": 5.0, "cost_sensitive": false },
   "candidates": [
     { "i": 0, "id": "claude-sonnet-4.6", "desc": "高能力通用模型;代码与长上下文突出",
       "tags": ["code","reasoning","long_context","tools","zh_good"],
@@ -335,7 +348,8 @@ CoarseRank(v1 薄实现,仅候选超限时启用):`coarse = 0.5*标签重叠率 
 }
 ```
 
-- **token 预算管理**: state ≈ 300 + 45×候选数;每问题 ≈ 60–90。候选 30 时总量 ≈ 5–7k token,远低于 64k 请求上限与 32k 单问题上限。>30 候选走 CoarseRank;>60 候选时分片多请求并行(每片 ≤30 个候选,融合阶段合并)。
+- **价格档位由代码计算**: `price_band` 按输入单价经 questions.yaml 的 `price_bands` 映射(cheap ≤ $1.0/M、mid ≤ $5.0/M、high > $5.0/M 输入 token);预算约束以显式数值进 `state.constraints`(未提供则不出现该字段,模型按中性判断)。
+- **token 预算管理**: state ≈ 300 + 45×候选数;每问题 ≈ 60–90。候选 30 时总量 ≈ 5–7k token,远低于 64k 请求上限与 32k 单问题上限。>30 候选按 6.2 分片并行(每片 ≤30),融合阶段按候选序号合并答案。
 - **单次调用**: 一次 `POST /v1/systemone`,全部问题并行回答;`model` 来自配置。
 
 ### 6.4 融合与置信度(确定性公式)
@@ -409,7 +423,7 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 {
   "recommendations": [
     {
-      "model": "claude-sonnet-4.6", "rank": 1, "score": 0.86, "confidence": 0.61,
+      "model": "claude-sonnet-4.6", "rank": 1, "score": 0.815, "confidence": 0.61,
       "low_confidence": false,
       "breakdown": {
         "quality_fit": 0.92, "cost_fit": 0.50, "weights": {"quality_fit": 0.75, "cost_fit": 0.25},
@@ -426,7 +440,7 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 ```
 
 - `include_debug: true` 时追加 `debug: {questions_sent, answers_raw, state}`(供 dry-run 联调)。
-- 全部候选被过滤:200 + `recommendations: []` + `profile` + `meta.filtered: {rule: count}`。
+- 全部候选被过滤(或目录为空):200 + `recommendations: []` + `profile` + `meta.filtered: [{rule, count}]`。合法结果,不报错(4.1 与本契约一致)。
 
 ### 8.2 错误与降级语义
 
@@ -434,8 +448,9 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 |---|---|
 | 请求体非法/超限 | `400 invalid_request_body` / `413 request_too_large` |
 | 约束字段非法 | `422 invalid_constraints`(附字段路径) |
-| 后端 4xx(非 429) | 不重试;若可失败安全则降级,否则 `502 upstream_error` |
-| 后端 429/529/超时/连接失败 | 退避重试 1 次(尊重 `retry-after`,封顶 2s)→ 仍失败 → **降级**:返回 CoarseRank 排序 + `degraded: true` + 理由注明"未经语义判断(后端不可用)" |
+| 后端 4xx(非 429,如 400/401/413/422) | 不重试(确定性错误,多为配置/请求问题)→ 同样降级:`degraded: true` + `meta.degraded_reason: backend_4xx` + 指标计数(不把配置错误放大为服务中断) |
+| `options.include_debug: true` 时后端出错 | 不降级,返回 `502 upstream_error` + 上游错误详情(联调时暴露真实问题) |
+| 后端 429/529/超时/连接失败/5xx | 退避重试 1 次(尊重 `retry-after`,封顶 2s)→ 仍失败 → **降级**:返回 CoarseRank 排序(见 6.2)+ `degraded: true` + `meta.degraded_reason` + 理由注明"未经语义判断(后端不可用)" |
 | 后端返回缺少问题答案 | 该维度按 0.5 中性值 + 记录警告;在 `meta` 标记 `partial_answers` |
 | 在途并发占满 | 等待 ≤2s,仍满 → 降级路径 |
 | 服务内部错误 | `500 internal_error`(带 request id) |
@@ -457,6 +472,7 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 - `moka` 内存 LRU;key = `blake3(canonical(profile_core) + canonical(constraints) + catalog_version + weights_version + top_k + locale)`。
 - `profile_core` 只含影响判断的字段(est_tokens 分桶到 256 粒度、布尔量、excerpt 的 blake3、候选 id 集合)——避免因微小文本差异全部 miss。
 - 命中直接返回完整响应(`meta.cache_hit=true`);TTL 默认 600s;`max_entries` 2048。
+- **`options.include_debug: true` 绕过缓存(不读不写)**: 调试响应(含原始答案/state)绝不入缓存,不会串给普通请求。
 - 目录/权重/配置变更 → 版本 hash 变化 → 旧键自然失效(不主动清理)。
 
 ### 9.2 重试与超时
@@ -471,7 +487,7 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 - 调用方: 静态 Bearer(env),恒定时间比较;缺失配置则仅允许本机(127.0.0.1)。
 - 后端 key: 仅 env;日志与 `meta` 不出现任何 secret。
 - `request_excerpt` 清洗: 去控制字符(保留 `\n`/`\t`)、限长(见 6.1);放入 state 的专用字段;所有指令只存在于 `questions`,不在 state 中混排(官方明确: state 被视为数据;不把不可信文本拼进指令位)。
-- `include_debug` 默认关闭,防敏感文本外泄。
+- `include_debug` 默认关闭且绕过缓存(见 9.1),防敏感文本外泄。
 
 ### 9.5 观测
 - 日志: `tracing` 结构化,含 request_id、catalog_version、weights_version、backend、latency、cache_hit、degraded。
@@ -519,7 +535,7 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 | Jev 无 SLA/限流漂移 | 服务不可用 | 重试+降级(确定性排序)+ 契约兼容备用后端(Laya/KEV 换 base_url);`max_inflight` 保护配额 |
 | 权重/档位未标定 | 排序不符合直觉 | `questions.yaml` 数据化;评估集 + shadow 回放闭环调参;门槛(flag_below)在自有数据上标定 |
 | 用户文本注入 state | 判断被操纵 | state 只作为数据、指令只在 questions、清洗+截断+专用字段(9.4) |
-| 候选过多超 token/上下文 | 请求失败 | CoarseRank 截断(30)+ 分片并行(>60);token 预算公式内建(6.3) |
+| 候选过多超 token/上下文 | 请求失败 | 分片并行(>30,每片 ≤30)+ 硬上限截断(>60,先粗排截断);token 预算公式内建(6.3) |
 | 目录漂移(价格/能力过期) | 错误推荐 | `validate-catalog` + 内容 hash 版本 + 审计可追溯 |
 | 决策模型版本行为变化 | 排序漂移 | 钉死版本 ID;升级走 eval 回归 |
 
