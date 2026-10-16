@@ -39,12 +39,13 @@
 - 一次批量语义调用(共享问题 + 每候选维度的 Score 问题),代码融合与模板理由(zh/en)。
 - 内存缓存、后端重试与降级、结构化日志与指标、审计日志。
 - CLI:`validate-catalog`、`dry-run`(打印将发送的完整问题,不联网)、`eval`(评估集跑分)。
+- 测试调试页: 服务内嵌 `GET /debug` 单 HTML(零构建;预填样例、约束表单、结果卡片 + 原始 JSON;开发/试用定位,非产品 UI,见 9.7)。
 - 本地部署:单二进制 + `configs/` 直接运行(见 9.6);默认对接云 Jev(需 `TYPESAFE_API_KEY`;区域限制环境需后端代理,见 7 节),无 key / 断网时自动走降级链路。
 
 ### v1 明确不做
 - 不做转发/计费/鉴权体系/用户管理(那是网关职责)。
 - 不做本地 Laya/KEV 模型部署(仅保证契约兼容;这是区域限制场景的治本路线,见 13 节)。
-- 不做 Web UI。
+- 不做产品级 Web UI(仅提供 9.7 的内嵌调试页)。
 - 不做学习型粗排与分类器蒸馏(留 v1.1,材料是审计日志)。
 - 不做多租户、不做 Embedding/向量检索。
 
@@ -105,7 +106,7 @@ model-recommender/                      # git 仓库根
 ├─ crates/
 │  ├─ core/          recommender-core    # 纯逻辑: 画像/规则/提问构造/融合/理由。无网络,全单测
 │  ├─ systemone/     recommender-systemone # /v1/systemone 契约客户端(reqwest)
-│  ├─ server/        recommender-server  # axum 二进制
+│  ├─ server/        recommender-server  # axum 二进制(含内嵌调试页 assets/debug.html)
 │  └─ cli/           recommender-cli     # 二进制: validate-catalog / dry-run / eval
 ├─ configs/
 │  ├─ catalog.yaml
@@ -294,6 +295,7 @@ confidence:
 ```yaml
 server: { listen: "0.0.0.0:8787", client_auth_token_env: RECOMMENDER_AUTH_TOKEN,
           admin_token_env: RECOMMENDER_ADMIN_TOKEN, metrics_enabled: true,
+          debug_page_enabled: true,
           max_request_bytes: 4194304, request_timeout_ms: 15000 }
 backends:
   - id: jev
@@ -495,6 +497,7 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 - `GET /readyz` → 目录已加载 + 至少一个可用 backend 配置 → 200;否则 503
 - `GET /v1/catalog` → 当前目录 + 版本 hash(需 `RECOMMENDER_ADMIN_TOKEN`,未配置则仅本机可访问)
 - `GET /metrics` → Prometheus 文本(可配开关)
+- `GET /debug` → 内嵌单文件调试页(开发/试用用途,见 9.7;受 `debug_page_enabled` 开关控制)
 
 ---
 
@@ -537,9 +540,21 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
   curl -s http://127.0.0.1:8787/v1/recommend \
        -H 'content-type: application/json' -d @examples/sample-request.json  # 4. 端到端拿 top5 + 理由
   ```
+- **浏览器调试台**: 服务启动后打开 `http://127.0.0.1:8787/debug` 可视化跑通推荐(见 9.7)。
 - **无 key / 断网行为**: 服务照常启动并应答;Jev 调用失败(如缺 key → 401)按 8.2 降级为粗排 + `degraded: true`,规则/融合/理由/审计链路仍可完整观察。
 - **区域限制(451)**: 大陆等地区直连 `api.typesafe.ai` 会被拒(451);给服务配置代理即可(server.yaml backend `proxy`,或启动时 `HTTPS_PROXY`),已实测经代理 HTTP 200。
 - **数据出境提示**: 语义判断会把清洗、截断后的请求摘要与候选目录(不含 key)发送至 `api.typesafe.ai`;敏感数据试用请用降级模式,或走 13 节的纯本地 Laya 路线(v1.1)。
+
+### 9.7 内嵌调试页(`GET /debug`)
+
+- **定位**: 开发/试用工具,非产品 UI(见 2 节);零构建、无外部依赖的单 HTML(原生 JS/CSS),构建时经 `include_str!` 内嵌进二进制(源码在 `crates/server/assets/debug.html`)。
+- **功能**:
+  - 预填样例请求(与 `examples/sample-request.json` 同构),可粘贴任意 OpenAI/Claude 风格请求体;
+  - 约束表单: `top_k`、`locale`、预算上限、`cost_sensitive`、`require_tags`、`vendor_allow/deny`;
+  - "推荐"按钮 → `POST /v1/recommend`;结果卡片(rank/score/confidence/low_confidence/reasons/breakdown)+ 原始 JSON 切换;
+  - 顶部 meta 横幅(backend / degraded / cache_hit / latency),方便观察降级与缓存行为;
+  - 鉴权: 若配置了调用方 token,页面提供输入框(仅存本机 localStorage)。
+- **安全**: 同源请求,无需 CORS;不新增权限面(复用调用方鉴权规则,含 9.4 的本机限制);可由 `debug_page_enabled` 关闭。
 
 ---
 
@@ -569,7 +584,7 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 | 阶段 | 内容 | 交付物 | 估计 |
 |---|---|---|---|
 | M0 骨架 | workspace、四份配置、catalog 加载+校验、规则引擎、API 薄壳、mock 后端、单测 | `dry-run` CLI 对样例请求打印完整待发问题(不联网) | 0.5–1 天 |
-| M1 核心 | systemone 客户端、提问构造、融合、理由渲染、真实联调 | `curl /v1/recommend` 端到端出 top5+理由;golden fixtures 通过 | 1–2 天 |
+| M1 核心 | systemone 客户端、提问构造、融合、理由渲染、/debug 调试页、真实联调 | `curl` 或 /debug 调试页端到端出 top5+理由;golden fixtures 通过 | 1–2 天 |
 | M2 运维 | 缓存、降级、重试、指标/日志、eval 工具、本地部署与试用引导(9.6)、Docker(可选) | 验收标准 1–4 全过;本地试用手册(四步 + curl)可用 | 1 天 |
 | M3 集成 | new-api 旁路接入示例(文档+最小 demo)、shadow 回放跑通 | 集成说明 + 首轮 shadow 报告 | 按需 |
 
