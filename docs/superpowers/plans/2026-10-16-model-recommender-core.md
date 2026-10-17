@@ -1091,7 +1091,7 @@ git add -A && git commit -m "feat(core): litellm model_list catalog with enrichm
 - `configs/rules.yaml`:逐字复制 **spec §5.2 的 YAML 代码块**。
 - `configs/questions.yaml`:逐字复制 **spec §5.3 的 YAML 代码块**(含全部 instructions/criteria/weights/confidence)。
 - `configs/server.yaml`:逐字复制 **spec §5.4 的 YAML 代码块**(其中 `catalog:` 段保持默认 `model_list.yaml`/`enrichment.yaml`——两个文件就在 configs/ 目录内;相对路径基于 configs 目录解析,也可写绝对路径直达网关真实配置),并做两处追加:
-  1. 顶层加一行 `templates_dir: templates`(理由模板目录,v1 扩展字段;加载器默认值即 `templates`)。
+  1. 顶层加一行 `templates_dir: templates`(理由模板目录,v1 扩展字段;加载器默认值即 `templates`;解析口径 = **CWD/仓库根相对** —— server 主程序、CLI dry-run 与 golden 测试三者一致)。
   2. 在 `backends:` 列表后追加注释,便于离线开发:
 
 ```yaml
@@ -1172,7 +1172,7 @@ cargo test -p recommender-core config    # 期望:编译失败(config 未实现)
 //! `catalog` 段路径装配(LiteLLM model_list + enrichment)。所有校验错误聚合返回,便于 validate-catalog 全量打印。
 
 use crate::catalog::Catalog;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -1332,11 +1332,13 @@ pub struct PerCandidateQuestions {
     pub cost_fit: QuestionSpec,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+// weights / confidence / price_bands 相关类型额外 derive Serialize —— Task 14 用
+// serde_json::to_value 生成 weights_version 的 canonical JSON(其余字段仍只读)。
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PriceBands { pub cheap_max: f64, pub mid_max: f64 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WeightsConfig {
     pub base: BaseWeights,
@@ -1345,22 +1347,22 @@ pub struct WeightsConfig {
     pub clamp: Clamp,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BaseWeights { pub quality_fit: f32, pub cost_fit: f32 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Clamp { pub min: f32, pub max: f32 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Adjustment {
     pub when: Conditions,
     pub set: std::collections::BTreeMap<String, DeltaValue>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Conditions {
     #[serde(default)] pub difficulty_at_least: Option<f32>,
@@ -1370,7 +1372,7 @@ pub struct Conditions {
 }
 
 /// `"+0.10"` / `"-0.10"` 字符串或数字。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum DeltaValue { Num(f32), Str(String) }
 
@@ -1390,7 +1392,7 @@ impl DeltaValue {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfidenceConfig { pub flag_below: f32 }
 
@@ -2475,7 +2477,8 @@ pub fn price_percentiles(models: &[ModelEntry]) -> Vec<f32> {
     out
 }
 
-/// 降序排好序的 (模型, 粗排分)。tie-break: 输入价格升序 → id 字典序(spec §6.2/§6.4 一致)。
+/// 降序排好序的 (模型, 粗排分)。tie-break: 输入价格升序 → id 字典序
+/// (采用 spec §6.4 的融合链;§6.2 行文仅写“id 字典序”,此处一致地细化到价格优先)。
 pub fn coarse_rank<'a>(profile: &Profile, models: &'a [ModelEntry]) -> Vec<(&'a ModelEntry, CoarseScore)> {
     let needs = needs(profile);
     let pct = price_percentiles(models);
@@ -2782,7 +2785,7 @@ git add -A && git commit -m "feat(core): deterministic mock judgment backend"
 ```rust
 //! 提问构造(spec §6.3): state、共享/每候选问题、价格档位、`<i>` 占位替换。
 
-use crate::api::{Constraints, Options};
+use crate::api::Constraints;
 use crate::config::{PriceBands, QuestionSpec, QuestionsConfig};
 use crate::judgment::{JudgeRequest, Question};
 use crate::model::ModelEntry;
@@ -2880,7 +2883,7 @@ pub fn build_judge_request(
     let mut questions: BTreeMap<String, Question> = BTreeMap::new();
 
     for (id, spec) in &cfg.shared {
-        // `Options` 在本函数不参与;保留参数以免后续需要(如 locale 相关指令)
+        // 共享问题:固定 ID(task_type / difficulty / frontier_needed)
         questions.insert(id.clone(), question_from(spec, None));
     }
     for c in choices {
@@ -2919,8 +2922,6 @@ pub fn substitute_i(v: &Value, idx: Option<usize>) -> Value {
         other => other.clone(),
     }
 }
-
-pub fn _touch(_o: &Options) {} // 预留:Options 暂不参与问题构造;如无需要可删。
 
 #[cfg(test)]
 mod tests {
@@ -3106,7 +3107,8 @@ mod tests {
     //    final == 0.773(误差 < 1e-4);round3 后 == 0.773。
     // 2. 四个调整全命中(difficulty=1.6、frontier=0.7、有预算、cost_sensitive=true)→ 仍为 0.65/0.35。
     // 3. difficulty 恰好 = 1.5 → 命中(>=);frontier 恰好 = 0.6 → 不命中(严格 >)。
-    // 4. clamp:构造极端 adjustments(cost_fit +0.90)使 wc 超 0.95 → 被 clamp 到 0.95。
+    // 4. clamp:构造极端 adjustments({quality_fit:"-0.70", cost_fit:"+0.90"})使归一化后 wc>0.95
+    //    (wq=0.05、wc=1.15,sum=1.20 → wc≈0.958)→ 被 clamp 到 0.95(只写 cost_fit "+0.90" 时 sum=1.90 → wc≈0.605,触发不了钳制)。
     // 5. norm_score: raw 3.0/4 档 → 1.0;raw -1 → 0.0;levels=1 → raw/1。
     // 6. 缺答案:q=None → q_norm 0.5 且 confidence 0.0;两者都 None → score = w_q*0.5+w_c*0.5。
     // 7. cmp_rank:同分低价优先;同分同价 id 升序。
@@ -4502,6 +4504,7 @@ git add -A && git commit -m "feat(server): axum routes with auth, error envelope
   <label><input type="checkbox" id="costsensitive"> 成本敏感</label>
   require_tags <input type="text" id="reqtags" placeholder="如 tools,vision" style="width:140px">
   vendor_allow <input type="text" id="allow" placeholder="如 anthropic,openai" style="width:170px">
+  vendor_deny <input type="text" id="deny" placeholder="如 gemini" style="width:110px">
   <label><input type="checkbox" id="debug"> include_debug</label></label>
 </div>
 <textarea id="req" spellcheck="false"></textarea>
@@ -4537,6 +4540,7 @@ document.getElementById("go").addEventListener("click", async () => {
   else if (cs) constraints.budget = { cost_sensitive: true };
   const rt = csv("reqtags"); if (rt.length) constraints.require_tags = rt;
   const al = csv("allow"); if (al.length) constraints.vendor_allow = al;
+  const dn = csv("deny"); if (dn.length) constraints.vendor_deny = dn;
 
   const options = { top_k: Number(document.getElementById("topk").value) || 5, locale: document.getElementById("locale").value };
   if (document.getElementById("debug").checked) options.include_debug = true;
@@ -5057,7 +5061,7 @@ async fn run_golden(locale: Locale) -> serde_json::Value {
     let fixture: JudgeResponse = serde_json::from_str(&fixture_text).expect("夹具必须是合法 JudgeResponse JSON");
 
     let backend = Arc::new(ReplayBackend { fixture: fixture.clone(), seen: Mutex::new(vec![]) });
-    let renderer = TemplateReasonRenderer::from_dir(&root.join("configs").join(&cfg.server.templates_dir))
+    let renderer = TemplateReasonRenderer::from_dir(&root.join(&cfg.server.templates_dir))
         .expect("理由模板必须可加载");
     let catalog: Arc<dyn CatalogProvider> = Arc::new(cfg.catalog.clone());
     let pipeline = Pipeline::new(&cfg, catalog, backend.clone(), Arc::new(renderer), "jev-1.13.0".into());
@@ -5178,7 +5182,8 @@ curl -s http://127.0.0.1:8787/v1/recommend \
 |---|---|
 | `POST /v1/recommend` | 推荐主接口;body `{request, constraints, options}` |
 | `GET /v1/catalog` | 当前模型目录(admin token;未配置时仅本机可访问) |
-| `GET /healthz` | 存活与目录就绪 |
+| `GET /healthz` | 存活探针 |
+| `GET /readyz` | 就绪探针:目录非空(backend 数量已在启动时校验),否则 503 |
 | `GET /debug` | 内嵌调试页(可由 `debug_page_enabled` 关闭) |
 
 鉴权:配置 `client_auth_token_env` 后调用方需 `Authorization: Bearer <token>`;本机来源豁免。
