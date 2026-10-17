@@ -169,6 +169,39 @@ pub fn substitute_i(v: &Value, idx: Option<usize>) -> Value {
     }
 }
 
+/// 候选规模策略(spec §6.2):
+/// N ≤ in_call → 单次;in_call < N ≤ judged → 分片(每片 ≤ in_call);
+/// N > judged → 先截断到 judged(截断由调用方按粗排结果执行),再分片。
+///
+/// 调用方保证 `in_call ≥ 1`(配置校验限定:`ServerConfig::validate` 要求
+/// `0 < max_candidates_in_call ≤ max_candidates_judged`);
+/// `in_call = 0` 且 `effective > 0` 时本函数不会终止。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShardPlan {
+    pub truncate_to: Option<usize>,
+    pub shards: Vec<std::ops::Range<usize>>,
+}
+
+pub fn plan_shards(n: usize, in_call: usize, judged: usize) -> ShardPlan {
+    debug_assert!(
+        in_call >= 1,
+        "in_call 必须 ≥ 1(ServerConfig::validate 限定)"
+    );
+    let truncate_to = if n > judged { Some(judged) } else { None };
+    let effective = truncate_to.unwrap_or(n);
+    let mut shards = Vec::new();
+    let mut start = 0;
+    while start < effective {
+        let end = (start + in_call).min(effective);
+        shards.push(start..end);
+        start = end;
+    }
+    ShardPlan {
+        truncate_to,
+        shards,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,6 +458,45 @@ mod tests {
         assert_eq!(substitute_i(&json!("<i>+<i>"), Some(0)), json!("0+0"));
         // idx = None → 原样返回
         assert_eq!(substitute_i(&v, None), v);
+    }
+
+    #[test]
+    fn plan_shards_boundaries_and_truncation() {
+        // N = 0 → 空计划,不截断
+        assert_eq!(
+            plan_shards(0, 30, 60),
+            ShardPlan {
+                truncate_to: None,
+                shards: vec![],
+            }
+        );
+        // N ≤ in_call → 单次调用
+        let p = plan_shards(1, 30, 60);
+        assert_eq!(p.truncate_to, None);
+        assert_eq!(p.shards.len(), 1);
+        assert_eq!(p.shards[0], 0..1);
+        let p = plan_shards(30, 30, 60);
+        assert_eq!(p.truncate_to, None);
+        assert_eq!(p.shards.len(), 1);
+        assert_eq!(p.shards[0], 0..30);
+        // in_call < N ≤ judged → 分片,无截断
+        let p = plan_shards(31, 30, 60);
+        assert_eq!(p.truncate_to, None);
+        assert_eq!(p.shards, vec![0..30, 30..31]);
+        let p = plan_shards(60, 30, 60);
+        assert_eq!(p.truncate_to, None);
+        assert_eq!(p.shards, vec![0..30, 30..60]);
+        // N > judged → 先截断到 judged,再分片
+        let p61 = plan_shards(61, 30, 60);
+        assert_eq!(p61.truncate_to, Some(60));
+        assert_eq!(p61.shards, vec![0..30, 30..60]);
+        let p90 = plan_shards(90, 30, 60);
+        assert_eq!(p90.truncate_to, Some(60));
+        assert_eq!(p90.shards, vec![0..30, 30..60]);
+        // 边界参数:in_call = 1, judged = 2 → 截断到 2,每片 1 个
+        let p = plan_shards(5, 1, 2);
+        assert_eq!(p.truncate_to, Some(2));
+        assert_eq!(p.shards, vec![0..1, 1..2]);
     }
 
     #[test]
