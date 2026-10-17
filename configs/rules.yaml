@@ -1,0 +1,14 @@
+rules:
+  - kind: capability          # 内置 kind: capability / context_length / budget / vendor / tag_require
+    enabled: true
+  - kind: context_length
+    enabled: true
+    safety_factor: 1.15       # est_tokens*safety + max(0, max_tokens) ≤ context_window
+  - kind: budget
+    enabled: true
+  - kind: vendor
+    enabled: true
+  - kind: tag_require
+    enabled: true
+soft_penalties:
+  vendor_preference: { white: [], value_each: 0.05 }   # 非 must,按需

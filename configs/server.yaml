@@ -1,0 +1,25 @@
+server: { listen: "0.0.0.0:8787", client_auth_token_env: RECOMMENDER_AUTH_TOKEN,
+          admin_token_env: RECOMMENDER_ADMIN_TOKEN, metrics_enabled: true,
+          debug_page_enabled: true,
+          max_request_bytes: 4194304, request_timeout_ms: 15000 }
+catalog:
+  model_list_path: model_list.yaml     # 相对路径基于本文件所在目录(configs/);绝对路径可直达网关真实配置
+  enrichment_path: enrichment.yaml
+backends:
+  - id: jev
+    kind: systemone
+    base_url: https://api.typesafe.ai
+    model: jev-1.13.0          # 钉死版本 ID,不用漂移 alias
+    api_key_env: TYPESAFE_API_KEY
+    proxy: null                # 区域限制(451)时必需,例: http://127.0.0.1:7897;留空则沿用 HTTPS_PROXY/ALL_PROXY 环境变量
+    timeout_ms: 5000           # 单次尝试
+    total_budget_ms: 8000      # 重试/退避/信号量排队共享的总预算,超预算立即降级
+    max_inflight: 16
+    retry: { max_attempts: 2, base_delay_ms: 250, honor_retry_after: true }
+    long_context_header: false # 候选过多分片,而非开 262k 长上下文
+# 离线开发可将下面这段取消注释,并把 kind: mock 的条目挪到列表首位(首个 backend 为默认):
+#  - id: mock
+#    kind: mock
+cache: { enabled: true, ttl_secs: 600, max_entries: 2048 }
+limits: { max_candidates_in_call: 30, max_candidates_judged: 60, default_top_k: 5 }
+templates_dir: templates

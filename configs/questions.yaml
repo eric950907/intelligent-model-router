@@ -1,0 +1,56 @@
+shared:
+  task_type:
+    type: choice
+    instructions: "用户请求属于哪类任务?以 `request_excerpt` 与 `profile` 为准。"
+    criteria:
+      code_debug: 排查/修复代码问题
+      code_gen: 编写新代码或改造现有代码
+      reasoning: 数学/逻辑/分析推理
+      translation: 翻译
+      creative: 创意写作
+      summarization: 摘要/提炼
+      extraction: 结构化抽取
+      chat: 一般对话/问答
+  difficulty:
+    type: score
+    instructions: "该请求的解决难度如何?"
+    criteria: ["简单,常规直接处理", "中等,需要一定专业能力", "困难,需要顶级推理或领域深度"]
+  frontier_needed:
+    type: noul
+    instructions: "该请求是否必须使用当前可得的最强能力模型才能可靠完成?"
+    criteria: { "true": "是,容错低且难度高", "false": "否,常规能力足够" }
+per_candidate:
+  quality_fit:
+    type: score
+    instructions: >-
+      `candidates[<i>]`(见 state.candidates)对本请求的质量匹配度如何?
+      考虑: 能力是否覆盖任务类型(参考 task_type/difficulty/frontier_needed)、
+      该模型在该领域的已知强项、上下文窗口是否满足、语言适配(参考 profile.locale_hint)。
+    criteria:
+      - { what: "明显不适合该需求", examples: ["需要视觉但无视觉能力"] }
+      - { what: "勉强可用，有明显短板", examples: ["能力可用但该领域不是强项"] }
+      - { what: "合适，能很好完成", examples: ["同类任务口碑良好"] }
+      - { what: "最佳匹配，任务特征高度吻合", examples: ["该任务的典型首选"] }
+  cost_fit:
+    type: score
+    instructions: >-
+      `candidates[<i>]` 的成本与需求方的预算/敏感度匹配度?(考虑输入/输出单价与
+      state.constraints;价格档位: cheap/mid/high 已标注在候选上;无约束时按中性判断)
+    criteria: ["超出预算或性价比明显差", "成本可接受", "经济实惠"]
+price_bands:                  # 代码据此把输入单价($/M tok)映射为 price_band
+  cheap_max: 1.0
+  mid_max: 5.0                # 超出即 high
+weights:
+  base: { quality_fit: 0.75, cost_fit: 0.25 }
+  adjustments:                # 命中即调整,可叠加,最后对两维归一化
+    - when: { difficulty_at_least: 1.5 }
+      set: { quality_fit: "+0.10", cost_fit: "-0.10" }
+    - when: { frontier_needed_above: 0.6 }
+      set: { quality_fit: "+0.05", cost_fit: "-0.05" }
+    - when: { budget_present: true }     # = constraints.budget 非空
+      set: { cost_fit: "+0.10", quality_fit: "-0.10" }
+    - when: { cost_sensitive: true }     # = constraints.budget.cost_sensitive == true
+      set: { cost_fit: "+0.15", quality_fit: "-0.15" }
+  clamp: { min: 0.05, max: 0.95 }
+confidence:
+  flag_below: 0.5             # 低于则 recommendation.low_confidence = true
