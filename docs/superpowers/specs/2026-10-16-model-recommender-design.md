@@ -1,7 +1,7 @@
 # 模型推荐服务(model-recommender)设计文档
 
 - **日期**: 2026-10-16
-- **状态**: 已批准(发起人 2026-10-16 确认;3 轮评审 + 契约实测修订完成)
+- **状态**: 已批准(发起人 2026-10-16 确认;3 轮评审 + 契约实测修订完成;后续修订: 调试页 §9.7、catalog 输入格式 §5.1 改为 LiteLLM model_list + enrichment)
 - **项目路径**: `/Users/mapxus/model-recommender/`
 - **实现语言**: Rust(2021 edition)
 
@@ -22,7 +22,7 @@
 
 **参考项目**: new-api(QuantumNous/new-api,已单独做过逆向分析)。参考其:
 - **适配器注册表模式**(`GetAdaptor` 工厂 + `plugins/tasks` 内嵌插件注册) → 本项目的 Rule/JudgmentBackend 注册表;
-- **Pricing 数据结构的字段设计**(model_name/description/tags/vendor/ratio/endpoint types)→ 本项目 `catalog.yaml` 的字段参考;
+- **模型清单/定价字段**(`model_name`、`model_info.input_cost_per_token` 等)→ 本项目 catalog 输入直接采用「与网关同构的 LiteLLM `model_list` 格式 + `enrichment.yaml` 富化」;
 - **渠道选择的"优先级分层+层内加权随机"思路**(`GetRandomSatisfiedChannel`)→ 本项目 v1.1 学习型粗排的预留参考,不在 v1 使用。
 
 **不照搬 new-api 任何代码**;它只作为模式参考。
@@ -33,7 +33,7 @@
 
 ### v1 做
 - 独立 HTTP 服务:输入原始请求体(OpenAI Chat Completions / Claude Messages 两种容错解析)+ 可选约束,输出 top-K + 理由。
-- 本地 `catalog.yaml` 目录(通过 `CatalogProvider` trait 暴露)。
+- 本地模型目录:直接使用**与网关同构的 LiteLLM `model_list` 格式**文件(可指向网关真实配置,价格自动同步)+ `enrichment.yaml` 补充推荐元数据;通过 `CatalogProvider` trait 暴露(见 5.1)。
 - 硬规则引擎(能力/上下文/预算/厂商约束,插件链)。
 - TypeSafe `/v1/systemone` 契约客户端(默认 `jev-latest` 对应钉死的版本 ID;Laya/KEV 换 `base_url` 即可)。
 - 一次批量语义调用(共享问题 + 每候选维度的 Score 问题),代码融合与模板理由(zh/en)。
@@ -57,7 +57,7 @@
 |---|---|---|
 | D1 | 形态 = **独立推荐服务**(HTTP),不做网关 | 可插拔性最强;new-api 等通过旁路/中间件调用;边界清晰 |
 | D2 | 输入 = **原始请求体 + 可选约束** | 最贴近真实网关场景;服务自己提炼需求画像 |
-| D3 | 模型清单 = **本地 YAML + CatalogProvider trait** | 字段完全可控;未来可加 new-api 同步 Provider |
+| D3 | 模型清单 = **LiteLLM `model_list`(网关同构)+ `enrichment.yaml` 富化 + CatalogProvider trait** | 零转写复用网关配置;价格随网关自动一致;上下文/能力等推荐元数据由 enrichment 补齐;未来可加 new-api 同步 Provider |
 | D4 | 分工 = **硬规则过滤 + Jev 软判断 + 代码融合** | 可控、可解释、省钱;决策模型不做确定性判断 |
 | D5 | 后端 = **/v1/systemone 契约客户端,默认 Jev** | KEV/Laya 刻意兼容该契约;换 base_url 即可;无 Rust 官方 SDK,手写简单 |
 | D6 | 理由 = **模板化**(结构化拼装,零额外 LLM 调用) | 决策模型不生成文本;i18n 与审计友好 |
@@ -109,7 +109,8 @@ model-recommender/                      # git 仓库根
 │  ├─ server/        recommender-server  # axum 二进制(含内嵌调试页 assets/debug.html)
 │  └─ cli/           recommender-cli     # 二进制: validate-catalog / dry-run / eval
 ├─ configs/
-│  ├─ catalog.yaml
+│  ├─ model_list.yaml      # LiteLLM model_list 格式(网关同构;可指向真实网关配置)
+│  ├─ enrichment.yaml      # 推荐元数据富化(vendor/tags/capabilities/context_window…)
 │  ├─ rules.yaml
 │  ├─ questions.yaml
 │  └─ server.yaml
@@ -126,7 +127,7 @@ model-recommender/                      # git 仓库根
 ### 4.3 可插拔 trait(注册表工厂 + 配置驱动)
 
 ```rust
-/// 目录来源。默认实现: 从 catalog.yaml 加载。未来: new-api pricing 同步。
+/// 目录来源。默认实现: LiteLLM model_list + enrichment.yaml 加载(见 5.1)。未来: new-api pricing 同步。
 pub trait CatalogProvider: Send + Sync {
     fn models(&self) -> &[ModelEntry];
     fn version(&self) -> &str;            // 内容 hash,用于缓存 key 与审计
@@ -168,38 +169,51 @@ pub trait ReasonRenderer: Send + Sync {
 
 ## 5. 数据模型与配置
 
-### 5.1 `catalog.yaml`
+### 5.1 模型目录:LiteLLM `model_list` + `enrichment.yaml`
+
+**catalog 输入 = 一份与网关同构的 LiteLLM `model_list` 配置文件(可直接指向网关现网配置,价格/模型名自动一致)+ 一份 `enrichment.yaml`(补齐推荐所需的上下文/能力/标签等元数据)。** 不再维护独立的 catalog 格式,零转写。
+
+`model_list` 格式(用户网关实际使用;解析时忽略无关字段):
 
 ```yaml
-version: 2026-10-16          # 人工维护的版本标记(内容仍会 hash)
-defaults:
-  status: enabled
-models:
-  - id: claude-sonnet-4.6
-    name: Claude Sonnet 4.6
-    vendor: anthropic
-    description: >-
-      高能力通用模型;代码与长上下文任务表现突出;支持工具调用与视觉。
-    tags: [code, reasoning, long_context, vision, tools, zh_good]
-    capabilities: { tools: true, vision: true, json_mode: true, audio_in: false }
-    context_window: 200000
-    max_output: 64000
-    price: { in_per_mtok: 3.0, out_per_mtok: 15.0 }
-    groups: [default]
-    quality_notes: ""         # 可选: 给 Jev 的补充质量描述
-  - id: deepseek-v3.2
-    name: DeepSeek V3.2
-    vendor: deepseek
-    description: 高性价比通用模型;中文强;支持工具调用。
-    tags: [chat, code, tools, zh_strong, cheap]
-    capabilities: { tools: true, vision: false, json_mode: true, audio_in: false }
-    context_window: 131072
-    max_output: 32768
-    price: { in_per_mtok: 0.28, out_per_mtok: 0.42 }
-    groups: [default]
+model_list:
+  - model_name: gpt-5.4                      # → 推荐输出的模型 id(网关路由名)
+    litellm_params: { model: azure/gpt-5.4 } # 仅参考,不参与判断
+    model_info:
+      input_cost_per_token: 2.5e-06          # USD/token → ×1e6 = $/M tok
+      output_cost_per_token: 1.5e-05
 ```
 
-**必填**: `id`(唯一)、`name`、`vendor`、`tags`(非空)、`capabilities`(布尔齐全)、`context_window`(>0)、`price`(非负);**可选**: `description`(默认空)、`quality_notes`(默认空)、`max_output`(默认 = `context_window`)、`groups`(默认 `[default]`)、`status`(默认 enabled)。以上约束由 `validate-catalog` 校验。**v1 语义**: `status: disabled` 的模型在加载时直接排除;`groups` 与 `soft_penalties.vendor_preference` 为 v1.1 保留字段(加载时校验格式、暂不消费)。
+**解析与归一化规则(v1,`catalog.rs`)**:
+- 同一 `model_name` 多条(多部署/多 key)→ 合并为一条,价格取首条;价格不一致 → 警告(`validate-catalog` 输出)。
+- 价格 = `model_info.input_cost_per_token` / `output_cost_per_token` × 1e6(四舍五入 6 位小数);缺价格 → 排除该条目并报告,`enrichment.price` 可覆盖。
+- **只收录 chat 类**:`model_info.mode` 存在且非 `chat` → 排除;无 mode 时按名称启发式排除已知非 chat 家族(`embed`/`imagen`/`dall`/`-image`/`veo`/`sora`/`seedance`/`happyhorse`/`-video`/`lyria`/`whisper`/`tts`/`rerank` 等内置表);`enrichment.mode` 可强制 `chat`(收录)或强制其他值(排除)。
+- `enrichment.status: disabled` → 排除;`vendor` 未富化时按模型名前缀推导(gpt/o1/o3/o4→openai、gemini→google、deepseek→deepseek、qwen→alibaba、kimi→moonshot、glm→zhipu、phi→microsoft、llama→meta、mistral→mistralai、claude→anthropic…),推不出 → `unknown` 并警告。
+- 排除清单(`skipped`)与非致命问题(`warnings`:未富化使用默认值、价格不一致、enrichment 孤儿条目)随目录保留,`validate-catalog` 逐条输出。
+- 内容 hash(catalog_version)= 归一化后模型数组(按 id 升序)canonical JSON 的 blake3 前 16 位;与 YAML 写法/字段顺序无关;变更即缓存自然失效。
+
+```yaml
+# enrichment.yaml —— 全部字段可选;未列出的模型整条走 defaults
+defaults:
+  context_window: 32768        # 无信息时的保守默认;validate-catalog 列出依赖默认值的模型
+  capabilities: { tools: false, vision: false, json_mode: false, audio_in: false }
+models:
+  gpt-5.4:
+    vendor: openai             # 可选(否则按名称前缀推导)
+    name: GPT-5.4              # 可选展示名(默认 = id)
+    description: 旗舰通用模型;推理与代码强。
+    tags: [reasoning, code, tools, vision, long_context]
+    capabilities: { tools: true, vision: true, json_mode: true }   # 未写字段继承 defaults
+    context_window: 400000
+    max_output: 128000         # 默认 = context_window
+    groups: [default]          # v1.1 保留字段
+    quality_notes: ""
+    status: enabled            # enabled|disabled
+    mode: chat                 # 可选:覆盖自动判定
+    price: { in_per_mtok: 2.5, out_per_mtok: 15.0 }   # 可选:覆盖 model_list 换算
+```
+
+**校验(`validate-catalog`)**: 合并去重后 id 天然唯一;`context_window > 0`、价格非负有限、enrichment 引用了不在 catalog 的 `model_name` → 警告;输出「收录 N / 排除 M(按原因分类)/ 依赖默认富化的 K 个 / 一致性警告」清单。**v1 语义**: `status: disabled` 加载即排除;`groups` 与 `soft_penalties.vendor_preference` 为 v1.1 保留字段(加载时校验格式、暂不消费)。
 
 ### 5.2 `rules.yaml`
 
@@ -297,6 +311,9 @@ server: { listen: "0.0.0.0:8787", client_auth_token_env: RECOMMENDER_AUTH_TOKEN,
           admin_token_env: RECOMMENDER_ADMIN_TOKEN, metrics_enabled: true,
           debug_page_enabled: true,
           max_request_bytes: 4194304, request_timeout_ms: 15000 }
+catalog:
+  model_list_path: model_list.yaml     # 相对路径基于本文件所在目录(configs/);绝对路径可直达网关真实配置
+  enrichment_path: enrichment.yaml
 backends:
   - id: jev
     kind: systemone
@@ -313,7 +330,7 @@ cache: { enabled: true, ttl_secs: 600, max_entries: 2048 }
 limits: { max_candidates_in_call: 30, max_candidates_judged: 60, default_top_k: 5 }
 ```
 
-secret 一律走环境变量(yaml 只存 env 名;backend `proxy` 为空时自动沿用 `HTTPS_PROXY`/`ALL_PROXY` 环境变量,见 7 节区域限制)。
+secret 一律走环境变量(yaml 只存 env 名;backend `proxy` 为空时自动沿用 `HTTPS_PROXY`/`ALL_PROXY` 环境变量,见 7 节区域限制)。`catalog` 的相对路径基于 `server.yaml` 所在目录解析;绝对路径原样使用(通常直接指向网关配置文件)。
 
 ---
 
@@ -359,11 +376,11 @@ CoarseRank(v1 薄实现,确定性):
   "task_hints": ["包含代码块", "提到报错堆栈"],
   "constraints": { "budget_max_in_price": 5.0, "cost_sensitive": false },
   "candidates": [
-    { "i": 0, "id": "claude-sonnet-4.6", "desc": "高能力通用模型;代码与长上下文突出",
-      "tags": ["code","reasoning","long_context","tools","zh_good"],
-      "ctx": 200000, "price_band": "mid", "in_price": 3.0, "out_price": 15.0 },
-    { "i": 1, "id": "deepseek-v3.2", "desc": "高性价比通用;中文强", "tags": ["chat","code","tools","zh_strong","cheap"],
-      "ctx": 131072, "price_band": "cheap", "in_price": 0.28, "out_price": 0.42 }
+    { "i": 0, "id": "gpt-5.4", "desc": "旗舰通用;推理与代码强",
+      "tags": ["reasoning","code","tools","vision","long_context"],
+      "ctx": 400000, "price_band": "mid", "in_price": 2.5, "out_price": 15.0 },
+    { "i": 1, "id": "deepseek-v4.1-flash", "desc": "高性价比;中文强", "tags": ["chat","cheap","tools","zh_strong"],
+      "ctx": 128000, "price_band": "cheap", "in_price": 0.283, "out_price": 1.131 }
   ]
 }
 ```
@@ -446,7 +463,7 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 {
   "recommendations": [
     {
-      "model": "claude-sonnet-4.6", "rank": 1, "score": 0.773, "confidence": 0.61,
+      "model": "gpt-5.4", "rank": 1, "score": 0.773, "confidence": 0.61,
       "low_confidence": false,
       "breakdown": {
         "quality_fit": 0.92, "cost_fit": 0.50, "weights": {"quality_fit": 0.65, "cost_fit": 0.35},
@@ -541,6 +558,7 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
        -H 'content-type: application/json' -d @examples/sample-request.json  # 4. 端到端拿 top5 + 理由
   ```
 - **浏览器调试台**: 服务启动后打开 `http://127.0.0.1:8787/debug` 可视化跑通推荐(见 9.7)。
+- **模型目录指向**: 默认用仓库内示例(`configs/model_list.yaml` / `enrichment.yaml`);实操时把 `server.yaml` 的 `catalog.model_list_path` 指向网关真实配置文件(绝对路径),再跑一次 `validate-catalog` 看「收录/排除/未富化」清单。
 - **无 key / 断网行为**: 服务照常启动并应答;Jev 调用失败(如缺 key → 401)按 8.2 降级为粗排 + `degraded: true`,规则/融合/理由/审计链路仍可完整观察。
 - **区域限制(451)**: 大陆等地区直连 `api.typesafe.ai` 会被拒(451);给服务配置代理即可(server.yaml backend `proxy`,或启动时 `HTTPS_PROXY`),已实测经代理 HTTP 200。
 - **数据出境提示**: 语义判断会把清洗、截断后的请求摘要与候选目录(不含 key)发送至 `api.typesafe.ai`;敏感数据试用请用降级模式,或走 13 节的纯本地 Laya 路线(v1.1)。
@@ -583,7 +601,7 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 
 | 阶段 | 内容 | 交付物 | 估计 |
 |---|---|---|---|
-| M0 骨架 | workspace、四份配置、catalog 加载+校验、规则引擎、API 薄壳、mock 后端、单测 | `dry-run` CLI 对样例请求打印完整待发问题(不联网) | 0.5–1 天 |
+| M0 骨架 | workspace、五份配置(model_list/enrichment/rules/questions/server)、model_list 解析+校验、规则引擎、API 薄壳、mock 后端、单测 | `dry-run` CLI 对样例请求打印完整待发问题(不联网) | 0.5–1 天 |
 | M1 核心 | systemone 客户端、提问构造、融合、理由渲染、/debug 调试页、真实联调 | `curl` 或 /debug 调试页端到端出 top5+理由;golden fixtures 通过 | 1–2 天 |
 | M2 运维 | 缓存、降级、重试、指标/日志、eval 工具、本地部署与试用引导(9.6)、Docker(可选) | 验收标准 1–4 全过;本地试用手册(四步 + curl)可用 | 1 天 |
 | M3 集成 | new-api 旁路接入示例(文档+最小 demo)、shadow 回放跑通 | 集成说明 + 首轮 shadow 报告 | 按需 |
@@ -599,7 +617,7 @@ recommendation.low_confidence = confidence(m) < questions.yaml.confidence.flag_b
 | 权重/档位未标定 | 排序不符合直觉 | `questions.yaml` 数据化;评估集 + shadow 回放闭环调参;门槛(flag_below)在自有数据上标定 |
 | 用户文本注入 state | 判断被操纵 | state 只作为数据、指令只在 questions、清洗+截断+专用字段(9.4) |
 | 候选过多超 token/上下文 | 请求失败 | 分片并行(>30,每片 ≤30)+ 硬上限截断(>60,先粗排截断);token 预算公式内建(6.3) |
-| 目录漂移(价格/能力过期) | 错误推荐 | `validate-catalog` + 内容 hash 版本 + 审计可追溯 |
+| 目录漂移(价格/能力过期) | 错误推荐 | 价格直连网关 `model_list` 自动同步;能力/上下文由 `enrichment.yaml` 维护,`validate-catalog` 列出未富化模型与警告 + 内容 hash 版本 + 审计可追溯 |
 | 决策模型版本行为变化 | 排序漂移 | 钉死版本 ID;升级走 eval 回归 |
 
 ---
