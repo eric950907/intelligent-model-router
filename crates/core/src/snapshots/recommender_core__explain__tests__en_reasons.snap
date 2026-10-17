@@ -1,0 +1,9 @@
+---
+source: crates/core/src/explain.rs
+expression: "lines.join(\"\\n\")"
+---
+✅ Hard constraints satisfied: context 128000 ≥ est. 8000; safety factor 1.15;tool calling supported, vision supported
+🧠 Quality fit 0.92: a good match for debugging tasks (concentrated on "最佳匹配" 61%)
+💰 Cost fit 0.50 ($2.50/M input, mid-priced): within budget cap
+⚠️ Low confidence (0.45): compare with the next ranked candidate
+➖ Soft penalty -0.10 (vendor_preference)
