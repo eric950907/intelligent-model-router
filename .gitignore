@@ -4,3 +4,4 @@
 .worktrees/
 *.log
 .DS_Store
+*.snap.new
