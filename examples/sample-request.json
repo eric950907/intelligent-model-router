@@ -1,0 +1,15 @@
+{
+  "request": {
+    "model": "gpt-5.4",
+    "messages": [
+      { "role": "system", "content": "You are a helpful coding assistant." },
+      { "role": "user", "content": "帮我修复这段 Rust 代码的编译错误:\n```rust\nfn main() { let x = 1 }\n```\n报错: error[E0308] mismatched types" }
+    ],
+    "max_tokens": 4096
+  },
+  "constraints": {
+    "require_tags": ["tools"],
+    "budget": { "max_input_price_per_mtok": 3.0, "cost_sensitive": true }
+  },
+  "options": { "top_k": 5, "locale": "zh" }
+}

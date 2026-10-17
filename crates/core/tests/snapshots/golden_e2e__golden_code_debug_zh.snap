@@ -1,0 +1,175 @@
+---
+source: crates/core/tests/golden_e2e.rs
+expression: v
+---
+{
+  "degraded": false,
+  "meta": {
+    "backend": "jev-1.13.0",
+    "cache_hit": false,
+    "catalog_version": "000e32dec3c34c01",
+    "latency_ms": 0,
+    "request_id": "golden-fixed-id",
+    "usage": {
+      "input_tokens": 6197,
+      "output_tokens": 492
+    },
+    "weights_version": "6f48ef6bb8aa02c8"
+  },
+  "profile": {
+    "difficulty": 0.25999999046325684,
+    "est_tokens": 50,
+    "frontier_needed": 0.07000000029802322,
+    "has_images": false,
+    "json_mode": false,
+    "locale_hint": "other",
+    "task_hints": [
+      "包含代码块",
+      "提到报错堆栈"
+    ],
+    "task_type": "code_debug",
+    "tools_count": 0
+  },
+  "recommendations": [
+    {
+      "breakdown": {
+        "cost_fit": 0.9950000047683716,
+        "penalty": 0.0,
+        "quality_fit": 0.6769999861717224,
+        "rule_hits": [
+          "capability✓",
+          "context_length✓",
+          "budget✓",
+          "vendor✓",
+          "tag_require✓"
+        ],
+        "weights": {
+          "cost_fit": 0.5,
+          "quality_fit": 0.4999999701976776
+        }
+      },
+      "confidence": 0.7699999809265137,
+      "low_confidence": false,
+      "model": "deepseek-v4.1-flash",
+      "rank": 1,
+      "reasons": [
+        "✅ 硬约束全部满足:上下文 128000 ≥ 估算 50;safety 系数 1.15",
+        "🧠 质量匹配 0.68:与代码调试类任务特征吻合 (概率集中在「2」77%)",
+        "💰 成本适配 1.00($0.28/M 输入,便宜):在预算上限内"
+      ],
+      "score": 0.8360000252723694
+    },
+    {
+      "breakdown": {
+        "cost_fit": 0.9049999713897705,
+        "penalty": 0.0,
+        "quality_fit": 0.597000002861023,
+        "rule_hits": [
+          "capability✓",
+          "context_length✓",
+          "budget✓",
+          "vendor✓",
+          "tag_require✓"
+        ],
+        "weights": {
+          "cost_fit": 0.5,
+          "quality_fit": 0.4999999701976776
+        }
+      },
+      "confidence": 0.7099999785423279,
+      "low_confidence": false,
+      "model": "gpt-5.4-mini",
+      "rank": 2,
+      "reasons": [
+        "✅ 硬约束全部满足:上下文 400000 ≥ 估算 50;safety 系数 1.15",
+        "🧠 质量匹配 0.60:与代码调试类任务特征吻合 (概率集中在「2」73%)",
+        "💰 成本适配 0.90($0.75/M 输入,便宜):在预算上限内"
+      ],
+      "score": 0.7509999871253967
+    },
+    {
+      "breakdown": {
+        "cost_fit": 0.9649999737739563,
+        "penalty": 0.0,
+        "quality_fit": 0.5070000290870667,
+        "rule_hits": [
+          "capability✓",
+          "context_length✓",
+          "budget✓",
+          "vendor✓",
+          "tag_require✓"
+        ],
+        "weights": {
+          "cost_fit": 0.5,
+          "quality_fit": 0.4999999701976776
+        }
+      },
+      "confidence": 0.5,
+      "low_confidence": false,
+      "model": "gemini-3.7-flash",
+      "rank": 3,
+      "reasons": [
+        "✅ 硬约束全部满足:上下文 1000000 ≥ 估算 50;safety 系数 1.15",
+        "🧠 质量匹配 0.51:与代码调试类任务特征吻合 (概率集中在「2」50%)",
+        "💰 成本适配 0.96($0.75/M 输入,便宜):在预算上限内"
+      ],
+      "score": 0.7360000014305115
+    },
+    {
+      "breakdown": {
+        "cost_fit": 0.9950000047683716,
+        "penalty": 0.0,
+        "quality_fit": 0.30300000309944153,
+        "rule_hits": [
+          "capability✓",
+          "context_length✓",
+          "budget✓",
+          "vendor✓",
+          "tag_require✓"
+        ],
+        "weights": {
+          "cost_fit": 0.5,
+          "quality_fit": 0.4999999701976776
+        }
+      },
+      "confidence": 0.8500000238418579,
+      "low_confidence": false,
+      "model": "gpt-5.6-luna",
+      "rank": 4,
+      "reasons": [
+        "✅ 硬约束全部满足:上下文 400000 ≥ 估算 50;safety 系数 1.15",
+        "🧠 质量匹配 0.30:与代码调试类任务特征吻合 (概率集中在「1」85%)",
+        "💰 成本适配 1.00($0.20/M 输入,便宜):在预算上限内"
+      ],
+      "score": 0.6489999890327454
+    },
+    {
+      "breakdown": {
+        "cost_fit": 0.5199999809265137,
+        "penalty": 0.0,
+        "quality_fit": 0.652999997138977,
+        "rule_hits": [
+          "capability✓",
+          "context_length✓",
+          "budget✓",
+          "vendor✓",
+          "tag_require✓"
+        ],
+        "weights": {
+          "cost_fit": 0.5,
+          "quality_fit": 0.4999999701976776
+        }
+      },
+      "confidence": 0.7699999809265137,
+      "low_confidence": false,
+      "model": "qwen3.7-max",
+      "rank": 5,
+      "reasons": [
+        "✅ 硬约束全部满足:上下文 256000 ≥ 估算 50;safety 系数 1.15",
+        "🧠 质量匹配 0.65:与代码调试类任务特征吻合 (概率集中在「2」77%)",
+        "💰 成本适配 0.52($1.65/M 输入,中档):在预算上限内"
+      ],
+      "score": 0.5870000123977661
+    }
+  ]
+}
