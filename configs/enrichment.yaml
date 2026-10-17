@@ -1,0 +1,74 @@
+# 推荐元数据富化:补齐 model_list 没有的字段(vendor/tags/capabilities/context_window…;spec §5.1),全部可选。
+# 未在此列出的模型整条走 defaults;validate-catalog 会列出所有依赖默认值的模型。
+defaults:
+  context_window: 32768        # 无信息时的保守默认
+  capabilities: { tools: false, vision: false, json_mode: false, audio_in: false }
+models:
+  gpt-5.4:
+    vendor: openai
+    description: 旗舰通用模型;推理与代码强;支持工具与视觉。
+    tags: [reasoning, code, tools, vision, long_context]
+    capabilities: { tools: true, vision: true, json_mode: true }
+    context_window: 400000
+    max_output: 128000
+  gpt-5.4-mini:
+    vendor: openai
+    description: 高性价比均衡款;日常任务与简单代码。
+    tags: [chat, cheap, code, tools, vision]
+    capabilities: { tools: true, vision: true, json_mode: true }
+    context_window: 400000
+  gpt-5.6-luna:
+    vendor: openai
+    description: 超低价轻量模型;适合大批量简单处理。
+    tags: [chat, cheap, tools]
+    capabilities: { tools: true, json_mode: true }
+    context_window: 400000
+  o4-mini:
+    vendor: openai
+    description: 紧凑推理模型;数学与逻辑题性价比高。
+    tags: [reasoning, cheap, tools, vision]
+    capabilities: { tools: true, vision: true, json_mode: true }
+    context_window: 200000
+  gemini-3.1-pro:
+    vendor: google
+    description: 超长上下文均衡旗舰;视觉与长文档强。
+    tags: [long_context, vision, tools, reasoning, code]
+    capabilities: { tools: true, vision: true, json_mode: true, audio_in: true }
+    context_window: 1000000
+    max_output: 65536
+  gemini-3.7-flash:
+    vendor: google
+    description: 快速便宜、超长上下文;适合批量常规处理。
+    tags: [chat, cheap, long_context, vision, tools]
+    capabilities: { tools: true, vision: true, json_mode: true, audio_in: true }
+    context_window: 1000000
+  deepseek-v4.1-flash:
+    vendor: deepseek
+    description: 高性价比;中文强;推理与代码均衡。
+    tags: [chat, cheap, tools, zh_strong]
+    capabilities: { tools: true, json_mode: true }
+    context_window: 128000
+  qwen3.7-max:
+    vendor: alibaba
+    description: 中文与推理强;工具调用完善。
+    tags: [chat, reasoning, zh_strong, tools]
+    capabilities: { tools: true, json_mode: true }
+    context_window: 256000
+  kimi-k3:
+    vendor: moonshot
+    description: 强推理与长文;中文强。
+    tags: [chat, reasoning, zh_strong, tools, long_context]
+    capabilities: { tools: true, json_mode: true }
+    context_window: 256000
+  glm-5.2:
+    vendor: zhipu
+    description: 均衡通用;中文强;性价比好。
+    tags: [chat, code, zh_strong, tools]
+    capabilities: { tools: true, json_mode: true }
+    context_window: 200000
+  private-ai/qwen3.5-35B-A3B-V2:
+    vendor: alibaba
+    description: 私有部署 Qwen3.5 MoE;数据不出内网。
+    tags: [chat, cheap, tools, zh_strong]
+    capabilities: { tools: true, json_mode: true }
+    context_window: 128000
