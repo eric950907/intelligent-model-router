@@ -1,0 +1,162 @@
+---
+source: crates/core/src/questions.rs
+expression: "serde_json::to_string_pretty(&req).unwrap()"
+---
+{
+  "model": "jev-1.13.0",
+  "state": {
+    "candidates": [
+      {
+        "ctx": 128000,
+        "desc": "deepseek-v3-0324 的描述",
+        "i": 0,
+        "id": "deepseek-v3-0324",
+        "in_price": 0.27,
+        "out_price": 0.54,
+        "price_band": "cheap",
+        "tags": [
+          "chat"
+        ]
+      },
+      {
+        "ctx": 128000,
+        "desc": "claude-opus-4-1 的描述",
+        "i": 1,
+        "id": "claude-opus-4-1",
+        "in_price": 15.0,
+        "out_price": 30.0,
+        "price_band": "high",
+        "tags": [
+          "chat"
+        ]
+      }
+    ],
+    "constraints": {
+      "budget_max_in_price": 3.0,
+      "cost_sensitive": true
+    },
+    "profile": {
+      "est_tokens": 8200,
+      "has_images": false,
+      "json_mode": true,
+      "locale_hint": "zh",
+      "max_tokens": 4096,
+      "tools_count": 3
+    },
+    "request_excerpt": "请帮我修一个 bug",
+    "task_hints": [
+      "包含代码块"
+    ]
+  },
+  "questions": {
+    "c0.cost_fit": {
+      "type": "score",
+      "instructions": "`candidates[0]` 的成本与需求方的预算/敏感度匹配度?(考虑输入/输出单价与 state.constraints;价格档位: cheap/mid/high 已标注在候选上;无约束时按中性判断)",
+      "criteria": [
+        "超出预算或性价比明显差",
+        "成本可接受",
+        "经济实惠"
+      ]
+    },
+    "c0.quality_fit": {
+      "type": "score",
+      "instructions": "`candidates[0]`(见 state.candidates)对本请求的质量匹配度如何? 考虑: 能力是否覆盖任务类型(参考 task_type/difficulty/frontier_needed)、 该模型在该领域的已知强项、上下文窗口是否满足、语言适配(参考 profile.locale_hint)。",
+      "criteria": [
+        {
+          "examples": [
+            "需要视觉但无视觉能力"
+          ],
+          "what": "明显不适合该需求"
+        },
+        {
+          "examples": [
+            "能力可用但该领域不是强项"
+          ],
+          "what": "勉强可用，有明显短板"
+        },
+        {
+          "examples": [
+            "同类任务口碑良好"
+          ],
+          "what": "合适，能很好完成"
+        },
+        {
+          "examples": [
+            "该任务的典型首选"
+          ],
+          "what": "最佳匹配，任务特征高度吻合"
+        }
+      ]
+    },
+    "c1.cost_fit": {
+      "type": "score",
+      "instructions": "`candidates[1]` 的成本与需求方的预算/敏感度匹配度?(考虑输入/输出单价与 state.constraints;价格档位: cheap/mid/high 已标注在候选上;无约束时按中性判断)",
+      "criteria": [
+        "超出预算或性价比明显差",
+        "成本可接受",
+        "经济实惠"
+      ]
+    },
+    "c1.quality_fit": {
+      "type": "score",
+      "instructions": "`candidates[1]`(见 state.candidates)对本请求的质量匹配度如何? 考虑: 能力是否覆盖任务类型(参考 task_type/difficulty/frontier_needed)、 该模型在该领域的已知强项、上下文窗口是否满足、语言适配(参考 profile.locale_hint)。",
+      "criteria": [
+        {
+          "examples": [
+            "需要视觉但无视觉能力"
+          ],
+          "what": "明显不适合该需求"
+        },
+        {
+          "examples": [
+            "能力可用但该领域不是强项"
+          ],
+          "what": "勉强可用，有明显短板"
+        },
+        {
+          "examples": [
+            "同类任务口碑良好"
+          ],
+          "what": "合适，能很好完成"
+        },
+        {
+          "examples": [
+            "该任务的典型首选"
+          ],
+          "what": "最佳匹配，任务特征高度吻合"
+        }
+      ]
+    },
+    "difficulty": {
+      "type": "score",
+      "instructions": "该请求的解决难度如何?",
+      "criteria": [
+        "简单,常规直接处理",
+        "中等,需要一定专业能力",
+        "困难,需要顶级推理或领域深度"
+      ]
+    },
+    "frontier_needed": {
+      "type": "noul",
+      "instructions": "该请求是否必须使用当前可得的最强能力模型才能可靠完成?",
+      "criteria": {
+        "false": "否,常规能力足够",
+        "true": "是,容错低且难度高"
+      }
+    },
+    "task_type": {
+      "type": "choice",
+      "instructions": "用户请求属于哪类任务?以 `request_excerpt` 与 `profile` 为准。",
+      "criteria": {
+        "chat": "一般对话/问答",
+        "code_debug": "排查/修复代码问题",
+        "code_gen": "编写新代码或改造现有代码",
+        "creative": "创意写作",
+        "extraction": "结构化抽取",
+        "reasoning": "数学/逻辑/分析推理",
+        "summarization": "摘要/提炼",
+        "translation": "翻译"
+      }
+    }
+  }
+}

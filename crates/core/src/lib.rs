@@ -8,4 +8,5 @@ pub mod judgment;
 pub mod mock;
 pub mod model;
 pub mod profile;
+pub mod questions;
 pub mod rules;
