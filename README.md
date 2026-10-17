@@ -1,3 +1,5 @@
+**简体中文** | [English](README.en.md) | [繁體中文](README.zh-TW.md)
+
 # intelligent-model-router(模型推荐服务)
 
 输入网关(OpenAI / Claude 风格)的原始请求体(POST body 的 `request` 字段),输出 top-K 模型推荐与中/英模板理由。
