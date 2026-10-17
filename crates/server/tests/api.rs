@@ -2,7 +2,7 @@
 
 use axum::body::Body;
 use axum::extract::ConnectInfo;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
 use recommender_core::config::{load_configs, ServerOpts};
 use recommender_core::explain::TemplateReasonRenderer;
@@ -49,6 +49,17 @@ async fn call(app: Router, req: Request<Body>) -> (StatusCode, serde_json::Value
         .unwrap();
     let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, json)
+}
+
+/// 发一个请求并取 (status, headers, body 原文)。HTML 页面不能用 JSON 解析。
+async fn call_raw(app: Router, req: Request<Body>) -> (StatusCode, HeaderMap, String) {
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, headers, String::from_utf8(bytes.to_vec()).unwrap())
 }
 
 fn json_req(
@@ -313,4 +324,31 @@ async fn catalog_allows_loopback_without_admin_token() {
     let (status, body) = call(test_router(|_| {}), get_req("/v1/catalog")).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["models"].is_array());
+}
+
+#[tokio::test]
+async fn debug_page_is_served_when_enabled() {
+    let (status, headers, body) = call_raw(test_router(|_| {}), get_req("/debug")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("text/html")),
+        "content-type: {:?}",
+        headers.get("content-type")
+    );
+    assert!(body.contains("Model Recommender Debug"));
+    assert!(body.contains("/v1/recommend"));
+}
+
+#[tokio::test]
+async fn debug_page_is_not_found_when_disabled() {
+    let (status, body) = call(
+        test_router(|o| o.debug_page_enabled = false),
+        get_req("/debug"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "not_found");
 }

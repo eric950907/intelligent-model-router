@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Model Recommender Debug</title>
+<style>
+ body{font-family:system-ui,-apple-system,"PingFang SC",sans-serif;margin:24px;max-width:1080px}
+ textarea{width:100%;height:220px;font-family:ui-monospace,Menlo,monospace;font-size:13px;box-sizing:border-box}
+ .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:8px 0}
+ .card{border:1px solid #ddd;border-radius:8px;padding:12px;margin:8px 0}
+ .meta{padding:8px 12px;border-radius:8px;background:#f5f5f5;margin-bottom:12px;font-size:13px}
+ .degraded{background:#fff3e0}.err{background:#ffebee;color:#b71c1c}
+ .badge{display:inline-block;padding:1px 8px;border-radius:10px;background:#e8eaf6;margin-left:6px;font-size:12px}
+ pre{background:#0f172a;color:#e2e8f0;padding:12px;border-radius:8px;overflow:auto;font-size:12px}
+ button{padding:8px 20px;border-radius:6px;border:1px solid #1976d2;background:#1976d2;color:#fff;cursor:pointer}
+ button:disabled{opacity:.5}
+ label{font-size:13px}
+ input[type=text],input[type=number],input[type=password]{padding:4px 8px;border:1px solid #ccc;border-radius:6px}
+</style>
+</head>
+<body>
+<h1>Model Recommender 调试页</h1>
+<div class="meta">
+  <label>调用 token(未启用鉴权可留空;仅存本机 localStorage):
+    <input type="password" id="token" style="width:280px"></label>
+</div>
+<div class="meta">
+  <label>约束: top_k <input type="number" id="topk" value="5" min="1" max="50" style="width:64px">
+  locale <select id="locale"><option value="zh">zh</option><option value="en">en</option></select>
+  预算上限 $/M <input type="number" id="maxprice" step="0.1" style="width:80px" placeholder="不限">
+  <label><input type="checkbox" id="costsensitive"> 成本敏感</label>
+  require_tags <input type="text" id="reqtags" placeholder="如 tools,vision" style="width:140px">
+  vendor_allow <input type="text" id="allow" placeholder="如 anthropic,openai" style="width:170px">
+  vendor_deny <input type="text" id="deny" placeholder="如 gemini" style="width:110px">
+  <label><input type="checkbox" id="debug"> include_debug</label></label>
+</div>
+<textarea id="req" spellcheck="false"></textarea>
+<div class="row">
+  <button id="go">推荐</button>
+  <span id="status"></span>
+</div>
+<div id="out"></div>
+<script>
+const SAMPLE = { model: "gpt-5.4", messages: [ { role: "user", content: "帮我修复这段 Rust 代码的编译错误:\n```rust\nfn main(){ let x = 1 }\n```\n报错: error[E0308]" } ], max_tokens: 4096 };
+document.getElementById("req").value = JSON.stringify(SAMPLE, null, 2);
+
+const tokenInput = document.getElementById("token");
+tokenInput.value = localStorage.getItem("rec_token") || "";
+tokenInput.addEventListener("change", () => localStorage.setItem("rec_token", tokenInput.value));
+
+function csv(id){ return document.getElementById(id).value.split(",").map(s => s.trim()).filter(Boolean); }
+function escapeHtml(s){ return s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+document.getElementById("go").addEventListener("click", async () => {
+  const status = document.getElementById("status");
+  const out = document.getElementById("out");
+  status.textContent = "请求中…";
+  out.innerHTML = "";
+  let requestBody;
+  try { requestBody = JSON.parse(document.getElementById("req").value); }
+  catch (e) { status.textContent = "请求体不是合法 JSON: " + e.message; return; }
+
+  const constraints = {};
+  const maxp = document.getElementById("maxprice").value;
+  const cs = document.getElementById("costsensitive").checked;
+  if (maxp) constraints.budget = { max_input_price_per_mtok: Number(maxp), cost_sensitive: cs };
+  else if (cs) constraints.budget = { cost_sensitive: true };
+  const rt = csv("reqtags"); if (rt.length) constraints.require_tags = rt;
+  const al = csv("allow"); if (al.length) constraints.vendor_allow = al;
+  const dn = csv("deny"); if (dn.length) constraints.vendor_deny = dn;
+
+  const options = { top_k: Number(document.getElementById("topk").value) || 5, locale: document.getElementById("locale").value };
+  if (document.getElementById("debug").checked) options.include_debug = true;
+
+  const headers = { "content-type": "application/json" };
+  const tok = tokenInput.value.trim();
+  if (tok) headers["authorization"] = "Bearer " + tok;
+
+  const t0 = performance.now();
+  try {
+    const res = await fetch("/v1/recommend", { method: "POST", headers, body: JSON.stringify({ request: requestBody, constraints, options }) });
+    const ms = Math.round(performance.now() - t0);
+    const data = await res.json();
+    if (!res.ok) {
+      status.textContent = "错误 " + res.status;
+      out.innerHTML = '<div class="card err"><b>' + escapeHtml(data.error || "error") + '</b>: ' + escapeHtml(data.message || "") + '<br><small>request_id: ' + escapeHtml(data.request_id || "") + '</small></div>';
+      return;
+    }
+    status.textContent = "完成(" + ms + " ms)";
+    render(data, ms);
+  } catch (e) { status.textContent = "网络错误: " + e.message; }
+});
+
+function render(data, ms) {
+  const out = document.getElementById("out");
+  const m = data.meta || {};
+  const banner = document.createElement("div");
+  banner.className = "meta" + (data.degraded ? " degraded" : "");
+  banner.innerHTML = 'backend <code>' + escapeHtml(String(m.backend ?? "-")) + '</code> · latency ' + (m.latency_ms ?? ms) + " ms · cache_hit " + m.cache_hit
+    + " · catalog " + escapeHtml(String(m.catalog_version ?? "-"))
+    + (data.degraded ? ' · <b>degraded: ' + escapeHtml(String(m.degraded_reason ?? "yes")) + "</b>" : "")
+    + (m.partial_answers ? " · partial: " + escapeHtml(m.partial_answers.join(", ")) : "")
+    + (m.filtered ? " · filtered: " + escapeHtml(m.filtered.map(f => f.rule + "×" + f.count).join(", ")) : "");
+  out.appendChild(banner);
+
+  if (data.profile) {
+    const p = document.createElement("div");
+    p.className = "meta";
+    p.textContent = "profile: task=" + (data.profile.task_type ?? "-") + " difficulty=" + (data.profile.difficulty ?? "-")
+      + " frontier=" + (data.profile.frontier_needed ?? "-") + " est_tokens=" + data.profile.est_tokens;
+    out.appendChild(p);
+  }
+
+  (data.recommendations || []).forEach(r => {
+    const bd = r.breakdown || {};
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = "<b>#" + r.rank + " " + escapeHtml(r.model) + "</b>"
+      + '<span class="badge">score ' + r.score + "</span>"
+      + '<span class="badge">conf ' + (r.confidence === null ? "null" : r.confidence) + "</span>"
+      + (r.low_confidence ? '<span class="badge">low_confidence</span>' : "")
+      + '<div style="font-size:12px;color:#666;margin:6px 0">quality ' + (bd.quality_fit ?? "-") + " · cost " + (bd.cost_fit ?? "-") + " · penalty " + (bd.penalty ?? "-")
+      + (bd.coarse ? " · coarse overlap " + bd.coarse.tag_overlap + " price " + bd.coarse.price_score : "")
+      + " · hits: " + escapeHtml((bd.rule_hits || []).join(" ")) + "</div>"
+      + "<ul>" + (r.reasons || []).map(x => "<li>" + escapeHtml(x) + "</li>").join("") + "</ul>";
+    out.appendChild(card);
+  });
+
+  const toggle = document.createElement("button");
+  toggle.textContent = "原始 JSON";
+  const pre = document.createElement("pre");
+  pre.style.display = "none";
+  pre.textContent = JSON.stringify(data, null, 2);
+  toggle.onclick = () => { pre.style.display = pre.style.display === "none" ? "block" : "none"; };
+  out.appendChild(toggle);
+  out.appendChild(pre);
+}
+</script>
+</body>
+</html>

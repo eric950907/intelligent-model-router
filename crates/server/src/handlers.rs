@@ -180,6 +180,18 @@ pub async fn readyz(State(state): State<AppState>) -> Response {
     }
 }
 
+/// 内嵌调试页(spec §9.7)。源码经 include_str! 编进二进制。
+pub async fn debug_page(State(state): State<AppState>) -> Response {
+    if !state.opts.debug_page_enabled {
+        return ApiError::not_found().into_response();
+    }
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        include_str!("../assets/debug.html"),
+    )
+        .into_response()
+}
+
 pub async fn catalog(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({
         "version": state.pipeline.catalog.version(),

@@ -38,6 +38,13 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/catalog",
             get(handlers::catalog).route_layer(admin_auth),
         )
+        .route(
+            "/debug",
+            get(handlers::debug_page).route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                handlers::client_auth,
+            )),
+        )
         .fallback(handlers::not_found)
         .method_not_allowed_fallback(handlers::method_not_allowed)
         .layer(DefaultBodyLimit::max(state.opts.max_request_bytes))
