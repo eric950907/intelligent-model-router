@@ -93,14 +93,14 @@ button,input,select,textarea{font:inherit;color:inherit}
 .label-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:18px 0 6px;font-size:13px;font-weight:600;color:var(--ink)}
 .hint{font-size:12px;color:var(--muted-ink);font-weight:400}
 
-.field{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--muted-ink);font-weight:500;margin-top:12px}
+.field{display:block;font-size:12px;color:var(--muted-ink);font-weight:500;margin-top:12px}
 .field input[type=text],.field input[type=number],.field input[type=password],.field select{
   width:100%;height:36px;background:var(--card);border:1px solid var(--line);
-  border-radius:var(--radius-md);padding:0 10px;outline:none;font-weight:400;color:var(--ink);
+  border-radius:var(--radius-md);padding:0 10px;margin-top:6px;outline:none;font-weight:400;color:var(--ink);
   transition:border-color .15s,box-shadow .15s;
 }
 .field input:focus,.field select:focus{border-color:var(--ring);box-shadow:0 0 0 3px color-mix(in oklch,var(--ring) 25%,transparent)}
-.field.checkbox{flex-direction:row;align-items:center;gap:8px;font-weight:400;color:var(--ink);margin-top:12px}
+.field.checkbox{display:flex;flex-direction:row;align-items:center;gap:8px;font-weight:400;color:var(--ink);margin-top:12px}
 .field.checkbox input{width:16px;height:16px;accent-color:var(--primary)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 
@@ -225,6 +225,25 @@ pre.raw-pre{
   background:var(--card);border-radius:var(--radius-sm);cursor:pointer;color:var(--muted-ink);
 }
 .theme-btn:hover{background:var(--muted);color:var(--ink)}
+
+.info{
+  display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;
+  border-radius:50%;border:1px solid color-mix(in oklch,var(--muted-ink) 45%,transparent);
+  color:var(--muted-ink);font-size:10px;font-weight:700;font-style:normal;line-height:1;
+  cursor:help;margin-left:4px;vertical-align:middle;flex:none;user-select:none;
+  transition:color .15s,border-color .15s,background .15s;
+}
+.info:hover,.info:focus-visible{
+  color:var(--primary);border-color:var(--primary);
+  background:color-mix(in oklch,var(--primary) 10%,transparent);outline:none;
+}
+#tip{
+  position:fixed;z-index:1000;display:none;max-width:300px;
+  background:#18181b;color:#fafafa;font-size:12px;line-height:1.5;font-weight:400;
+  padding:8px 10px;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.28);
+  pointer-events:none;
+}
+#tip.show{display:block}
 </style>
 <script>
 (function(){try{if(localStorage.getItem("rec_theme")==="dark"){document.documentElement.classList.add("dark");}}catch(e){}})();
@@ -259,43 +278,39 @@ pre.raw-pre{
     </div>
 
     <div class="grid2">
-      <label class="field">模型(网关侧标识)
+      <label class="field">模型(网关侧标识)<span class="info" tabindex="0" data-tip="网关请求体中的 model 字段,仅用于标识;真正用于语义判断的模型由 server.yaml 的 backends[].model 固定。">i</span>
         <input id="model" type="text" value="gpt-5.4" placeholder="如 gpt-5.4 / claude-sonnet-4">
       </label>
-      <label class="field">max_tokens
+      <label class="field">max_tokens<span class="info" tabindex="0" data-tip="期望的最大输出 token 数;硬规则会把 max_tokens 计入上下文需求(est×safety + max_tokens ≤ 模型上下文)。留空表示不设置。">i</span>
         <input id="maxtokens" type="number" min="1" placeholder="不设置">
       </label>
     </div>
 
     <div class="label-row">
-      <span>对话消息</span>
+      <span>对话消息<span class="info" tabindex="0" data-tip="对话消息:选择角色(system / user / assistant / tool)并填写正文,可增删多条。提取画像时会统计 token、语言、代码块、报错、链接等特征。">i</span></span>
       <button id="add-msg" class="chip" type="button">＋ 添加消息</button>
     </div>
     <div id="messages"></div>
 
     <div class="toolbar">
-      <label class="switch" title="在请求中加入一个示例 tools 定义">
-        <input type="checkbox" id="with-tools"> 携带 tools
-      </label>
-      <label class="switch" title="把最后一条 user 消息改写为 text + image_url 内容块">
-        <input type="checkbox" id="with-image"> 带图片(vision)
-      </label>
+      <label class="switch"><input type="checkbox" id="with-tools"> 携带 tools<span class="info" tabindex="0" data-tip="在请求体中加入一个示例 tools 定义;有 tools 时只推荐支持 tool_calls 的模型。">i</span></label>
+      <label class="switch"><input type="checkbox" id="with-image"> 带图片(vision)<span class="info" tabindex="0" data-tip="把最后一条 user 消息改写为 text + image_url 内容块;有图片时只推荐支持视觉的模型。">i</span></label>
       <label class="switch">
-        响应格式
+        响应格式<span class="info" tabindex="0" data-tip="设置 response_format.type;选 json_object / json_schema 时只推荐支持 JSON 模式的模型。">i</span>
         <select id="respformat">
           <option value="">默认</option>
           <option value="json_object">json_object</option>
           <option value="json_schema">json_schema</option>
         </select>
       </label>
-      <label class="switch"><input type="checkbox" id="stream"> stream</label>
+      <label class="switch"><input type="checkbox" id="stream"> stream<span class="info" tabindex="0" data-tip="标记流式请求(stream: true);仅记录到画像,不影响模型过滤。">i</span></label>
     </div>
 
     <div class="grid2">
-      <label class="field">top_k
+      <label class="field">top_k<span class="info" tabindex="0" data-tip="返回的推荐条数(1–50);默认取 server.yaml 的 limits.default_top_k(5)。">i</span>
         <input id="topk" type="number" min="1" max="50" value="5">
       </label>
-      <label class="field">locale
+      <label class="field">locale<span class="info" tabindex="0" data-tip="理由语言:zh 中文 / en English;不影响模型排序。">i</span>
         <select id="locale">
           <option value="zh">zh 中文理由</option>
           <option value="en">en English reasons</option>
@@ -306,28 +321,28 @@ pre.raw-pre{
     <details class="section" open>
       <summary>约束 <span class="hint">全部可选</span></summary>
       <div class="grid2">
-        <label class="field">预算上限 $/M
+        <label class="field">预算上限 $/M<span class="info" tabindex="0" data-tip="输入单价的预算上限($/百万 token);超过上限的模型会被 budget 规则过滤,留空表示不限。">i</span>
           <input id="maxprice" type="number" step="0.01" min="0" placeholder="不限">
         </label>
-        <label class="field checkbox"><input id="costsensitive" type="checkbox"> 成本敏感</label>
+        <label class="field checkbox"><input id="costsensitive" type="checkbox"> 成本敏感<span class="info" tabindex="0" data-tip="让融合权重向成本倾斜(cost_sensitive 调整项);可单独勾选,不必设置预算上限。">i</span></label>
       </div>
-      <label class="field">require_tags
+      <label class="field">require_tags<span class="info" tabindex="0" data-tip="模型必须包含的标签,逗号分隔(如 tools,vision);缺任一标签即被过滤。标签来自 enrichment.yaml。">i</span>
         <input id="reqtags" type="text" placeholder="tools,vision">
       </label>
       <div class="grid2">
-        <label class="field">vendor_allow
+        <label class="field">vendor_allow<span class="info" tabindex="0" data-tip="厂商白名单,逗号分隔(如 openai,anthropic);非空时只保留这些厂商。">i</span>
           <input id="allow" type="text" placeholder="openai,anthropic">
         </label>
-        <label class="field">vendor_deny
+        <label class="field">vendor_deny<span class="info" tabindex="0" data-tip="厂商黑名单,逗号分隔(如 gemini);命中即被过滤,优先级高于白名单。">i</span>
           <input id="deny" type="text" placeholder="gemini">
         </label>
       </div>
-      <label class="field checkbox"><input id="debug" type="checkbox"> include_debug <span class="hint">附带发送的问题与原始答案</span></label>
+      <label class="field checkbox"><input id="debug" type="checkbox"> include_debug<span class="info" tabindex="0" data-tip="在响应中附带发送给 Jev 的完整问题与原始答案(debug 字段);响应体积会明显变大,建议仅排查时开启。">i</span></label>
     </details>
 
     <details class="section">
       <summary>鉴权 <span class="hint">仅当服务配置了 token 时需要</span></summary>
-      <label class="field">Bearer token
+      <label class="field">Bearer token<span class="info" tabindex="0" data-tip="调用方鉴权 token;仅当服务端配置了 client_auth_token_env 时需要,只保存在本机 localStorage。">i</span>
         <input id="token" type="password" autocomplete="off" placeholder="未启用鉴权可留空">
       </label>
       <p class="hint" style="margin:8px 0 0">token 只保存在本机 localStorage,不会写入服务端。</p>
@@ -340,10 +355,10 @@ pre.raw-pre{
     </div>
 
     <details class="section">
-      <summary>请求体(自动生成) <span class="hint">可手动覆盖</span></summary>
+      <summary>请求体(自动生成)<span class="info" tabindex="0" data-tip="根据左侧表单实时生成的 request 对象;展开可预览、复制,或切换为手动编辑。">i</span></summary>
       <pre id="req-preview" class="raw-pre"></pre>
       <div class="toolbar">
-        <label class="switch"><input type="checkbox" id="manual-json"> 高级:手动编辑 JSON</label>
+        <label class="switch"><input type="checkbox" id="manual-json"> 高级:手动编辑 JSON<span class="info" tabindex="0" data-tip="直接编辑完整 request JSON(支持表单未覆盖的字段 / Claude 风格);勾选后提交以这里为准。">i</span></label>
         <button id="rebuild-json" class="btn-ghost" type="button" style="display:none">从表单重建</button>
       </div>
       <textarea id="req-manual" spellcheck="false" style="display:none;min-height:190px;margin-top:10px;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px;font-family:var(--mono);font-size:12.5px;width:100%"></textarea>
@@ -883,6 +898,69 @@ pre.raw-pre{
     renderThemeIcon();
   });
   renderThemeIcon();
+
+  // ---------- field tooltips ----------
+  var tipEl = document.createElement("div");
+  tipEl.id = "tip";
+  document.body.appendChild(tipEl);
+  var tipOwner = null;
+
+  function showTip(el) {
+    var text = el.getAttribute("data-tip");
+    if (!text) return;
+    tipOwner = el;
+    tipEl.textContent = text;
+    tipEl.classList.add("show");
+    tipEl.style.left = "-9999px";
+    tipEl.style.top = "0px";
+    var r = el.getBoundingClientRect();
+    var tw = tipEl.offsetWidth;
+    var th = tipEl.offsetHeight;
+    var left = r.left + r.width / 2 - tw / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - tw - 8));
+    var top = r.bottom + 8;
+    if (top + th > window.innerHeight - 8) top = r.top - th - 8;
+    if (top < 8) top = 8;
+    tipEl.style.left = left + "px";
+    tipEl.style.top = top + "px";
+  }
+
+  function hideTip(el) {
+    if (el && tipOwner !== el) return;
+    tipOwner = null;
+    tipEl.classList.remove("show");
+  }
+
+  document.addEventListener("mouseover", function (e) {
+    var el = e.target.closest && e.target.closest(".info");
+    if (el) showTip(el);
+  });
+  document.addEventListener("mouseout", function (e) {
+    var el = e.target.closest && e.target.closest(".info");
+    if (el) hideTip(el);
+  });
+  document.addEventListener("focusin", function (e) {
+    var el = e.target.closest && e.target.closest(".info");
+    if (el) showTip(el);
+  });
+  document.addEventListener("focusout", function (e) {
+    var el = e.target.closest && e.target.closest(".info");
+    if (el) hideTip(el);
+  });
+  document.addEventListener("mousedown", function (e) {
+    if (e.target.closest && e.target.closest(".info")) e.preventDefault();
+  });
+  document.addEventListener("click", function (e) {
+    var el = e.target.closest && e.target.closest(".info");
+    if (el) {
+      e.preventDefault();
+      e.stopPropagation();
+      showTip(el);
+      return;
+    }
+    hideTip();
+  });
+  window.addEventListener("scroll", function () { hideTip(); }, true);
 
   // ---------- boot ----------
   setForm(PRESETS.code);
