@@ -4,6 +4,7 @@ pub mod api;
 pub mod catalog;
 pub mod coarse;
 pub mod config;
+pub mod judgment;
 pub mod model;
 pub mod profile;
 pub mod rules;
