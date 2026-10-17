@@ -4,6 +4,7 @@ pub mod api;
 pub mod catalog;
 pub mod coarse;
 pub mod config;
+pub mod fusion;
 pub mod judgment;
 pub mod mock;
 pub mod model;
